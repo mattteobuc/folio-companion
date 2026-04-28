@@ -72,6 +72,12 @@ export default function CheckinPage() {
   return (
     <main className="min-h-screen bg-zinc-50 px-4 py-10 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
       <section className="mx-auto w-full max-w-2xl rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-900 sm:p-8">
+        <Link
+          href="/dashboard"
+          className="mb-4 inline-flex text-sm font-medium text-blue-600 transition hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300"
+        >
+          ← Torna alla dashboard
+        </Link>
         <h1 className="text-2xl font-semibold tracking-tight">Come ti senti questa settimana?</h1>
 
         <form onSubmit={handleSubmit} className="mt-6 space-y-6">
@@ -128,6 +134,15 @@ export default function CheckinPage() {
             <p className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-300">
               {successMessage}
             </p>
+          ) : null}
+
+          {successMessage ? (
+            <Link
+              href="/dashboard"
+              className="inline-flex w-full items-center justify-center rounded-lg border border-zinc-300 bg-white px-4 py-2.5 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:border-blue-500 dark:hover:text-blue-400"
+            >
+              Torna alla dashboard
+            </Link>
           ) : null}
 
           <button

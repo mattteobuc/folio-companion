@@ -19,6 +19,10 @@ type GNewsArticle = {
 const SUMMARY_SYSTEM_PROMPT =
   "Sei un assistente finanziario. Riassumi questa notizia in massimo 2 frasi in italiano, spiegando perché potrebbe essere rilevante per chi possiede questo asset. Non dare mai consigli di acquisto o vendita. Tono: chiaro, diretto, non allarmistico.";
 
+function normalizeTitleKey(title: string) {
+  return title.trim().toLowerCase();
+}
+
 async function summarizeWithClaude(input: {
   ticker: string;
   title: string;
@@ -80,7 +84,7 @@ async function summarizeWithClaude(input: {
   return summaryText;
 }
 
-export async function GET() {
+async function handleNewsRequest(cachedSummaries: Record<string, string> = {}) {
   try {
     const gnewsApiKey = process.env.GNEWS_API_KEY;
 
@@ -174,15 +178,20 @@ export async function GET() {
       for (const article of articles) {
         try {
           const sourceName = article.source?.name?.trim() || "Fonte non disponibile";
-          const summary = await summarizeWithClaude({
-            ticker,
-            title: article.title,
-            source: sourceName,
-            date: article.publishedAt,
-            url: article.url,
-            description: article.description ?? "",
-            content: article.content ?? "",
-          });
+          const cacheKey = normalizeTitleKey(article.title ?? "");
+          let summary = cacheKey ? cachedSummaries[cacheKey] : undefined;
+
+          if (!summary) {
+            summary = await summarizeWithClaude({
+              ticker,
+              title: article.title,
+              source: sourceName,
+              date: article.publishedAt,
+              url: article.url,
+              description: article.description ?? "",
+              content: article.content ?? "",
+            });
+          }
 
           newsResults.push({
             ticker,
@@ -205,5 +214,21 @@ export async function GET() {
       { error: "Errore inatteso durante il recupero delle notizie." },
       { status: 500 },
     );
+  }
+}
+
+export async function GET() {
+  return handleNewsRequest();
+}
+
+export async function POST(request: Request) {
+  try {
+    const body = (await request.json()) as {
+      cachedSummaries?: Record<string, string>;
+    };
+
+    return handleNewsRequest(body.cachedSummaries ?? {});
+  } catch {
+    return handleNewsRequest();
   }
 }
