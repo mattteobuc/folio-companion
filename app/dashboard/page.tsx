@@ -27,6 +27,11 @@ type NewsItem = {
   riassunto: string;
 };
 
+type MacroPayload = {
+  testo: string;
+  data: string;
+};
+
 const ASSET_TYPES = ["Azione", "ETF", "Obbligazione", "Crypto", "Altro"] as const;
 
 export default function DashboardPage() {
@@ -37,6 +42,10 @@ export default function DashboardPage() {
   const [userEmail, setUserEmail] = useState("");
   const [portfolioId, setPortfolioId] = useState<string | null>(null);
   const [assets, setAssets] = useState<AssetRow[]>([]);
+  const [macroText, setMacroText] = useState("");
+  const [macroDate, setMacroDate] = useState(new Date().toLocaleDateString("it-IT"));
+  const [isMacroLoading, setIsMacroLoading] = useState(false);
+  const [macroErrorMessage, setMacroErrorMessage] = useState<string | null>(null);
   const [news, setNews] = useState<NewsItem[]>([]);
   const [isNewsLoading, setIsNewsLoading] = useState(false);
   const [newsErrorMessage, setNewsErrorMessage] = useState<string | null>(null);
@@ -126,6 +135,32 @@ export default function DashboardPage() {
     }
   }, []);
 
+  const loadMacroContext = useCallback(async () => {
+    setIsMacroLoading(true);
+    setMacroErrorMessage(null);
+
+    try {
+      const response = await fetch("/api/macro", { method: "GET", cache: "no-store" });
+      const payload = (await response.json()) as MacroPayload & { error?: string };
+
+      if (!response.ok) {
+        throw new Error(payload.error || "Errore durante il recupero del contesto macro.");
+      }
+
+      setMacroText(payload.testo || "");
+      setMacroDate(payload.data || new Date().toLocaleDateString("it-IT"));
+    } catch (error) {
+      console.error("Errore caricamento contesto macro:", error);
+      setMacroErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Errore inatteso durante il caricamento del contesto macro.",
+      );
+    } finally {
+      setIsMacroLoading(false);
+    }
+  }, []);
+
   const loadDashboardData = useCallback(async () => {
     setErrorMessage(null);
     setIsPageLoading(true);
@@ -152,6 +187,7 @@ export default function DashboardPage() {
 
       setPortfolioId(currentPortfolioId);
       await loadAssets(currentPortfolioId);
+      await loadMacroContext();
       await loadNews();
     } catch (error) {
       console.error("Errore caricamento dashboard:", error);
@@ -161,7 +197,7 @@ export default function DashboardPage() {
     } finally {
       setIsPageLoading(false);
     }
-  }, [ensureDefaultPortfolio, loadAssets, loadNews, router, supabase]);
+  }, [ensureDefaultPortfolio, loadAssets, loadMacroContext, loadNews, router, supabase]);
 
   useEffect(() => {
     const animationFrameId = window.requestAnimationFrame(() => {
@@ -285,6 +321,12 @@ export default function DashboardPage() {
           </p>
 
           <div className="flex items-center gap-3">
+            <a
+              href="/checkin"
+              className="hidden rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:border-blue-500 dark:hover:text-blue-400 sm:inline-flex"
+            >
+              Check-in settimanale
+            </a>
             <span className="hidden text-sm text-zinc-600 dark:text-zinc-300 sm:inline">
               {userEmail || "Utente"}
             </span>
@@ -301,6 +343,33 @@ export default function DashboardPage() {
       </header>
 
       <section className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-6 lg:px-8">
+        <div className="mb-6 rounded-xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold tracking-tight">Contesto di mercato</h2>
+            <button
+              type="button"
+              onClick={() => void loadMacroContext()}
+              disabled={isMacroLoading}
+              className="inline-flex items-center rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-70 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:border-blue-500 dark:hover:text-blue-400"
+            >
+              {isMacroLoading ? "Aggiornamento..." : "Aggiorna"}
+            </button>
+          </div>
+          <p className="mb-3 inline-flex items-center gap-2 text-sm text-zinc-500 dark:text-zinc-400">
+            <span aria-hidden>📅</span>
+            <span>{macroDate}</span>
+          </p>
+          {macroErrorMessage ? (
+            <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300">
+              {macroErrorMessage}
+            </p>
+          ) : (
+            <p className="text-sm leading-7 text-zinc-700 dark:text-zinc-300">
+              {macroText || "Nessun contesto disponibile al momento."}
+            </p>
+          )}
+        </div>
+
         <div className="mb-5 flex items-center justify-between">
           <h1 className="text-2xl font-semibold tracking-tight">Il mio portafoglio</h1>
           <button
