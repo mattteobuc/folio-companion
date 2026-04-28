@@ -18,6 +18,15 @@ type PortfolioRow = {
   id: string;
 };
 
+type NewsItem = {
+  ticker: string;
+  titolo: string;
+  fonte: string;
+  url: string;
+  data: string;
+  riassunto: string;
+};
+
 const ASSET_TYPES = ["Azione", "ETF", "Obbligazione", "Crypto", "Altro"] as const;
 
 export default function DashboardPage() {
@@ -28,6 +37,9 @@ export default function DashboardPage() {
   const [userEmail, setUserEmail] = useState("");
   const [portfolioId, setPortfolioId] = useState<string | null>(null);
   const [assets, setAssets] = useState<AssetRow[]>([]);
+  const [news, setNews] = useState<NewsItem[]>([]);
+  const [isNewsLoading, setIsNewsLoading] = useState(false);
+  const [newsErrorMessage, setNewsErrorMessage] = useState<string | null>(null);
   const [isAddAssetModalOpen, setIsAddAssetModalOpen] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [ticker, setTicker] = useState("");
@@ -91,6 +103,29 @@ export default function DashboardPage() {
     [supabase],
   );
 
+  const loadNews = useCallback(async () => {
+    setIsNewsLoading(true);
+    setNewsErrorMessage(null);
+
+    try {
+      const response = await fetch("/api/news", { method: "GET", cache: "no-store" });
+      const payload = (await response.json()) as { news?: NewsItem[]; error?: string };
+
+      if (!response.ok) {
+        throw new Error(payload.error || "Errore durante il recupero delle notizie.");
+      }
+
+      setNews(payload.news ?? []);
+    } catch (error) {
+      console.error("Errore caricamento notizie:", error);
+      setNewsErrorMessage(
+        error instanceof Error ? error.message : "Errore inatteso durante il caricamento notizie.",
+      );
+    } finally {
+      setIsNewsLoading(false);
+    }
+  }, []);
+
   const loadDashboardData = useCallback(async () => {
     setErrorMessage(null);
     setIsPageLoading(true);
@@ -117,6 +152,7 @@ export default function DashboardPage() {
 
       setPortfolioId(currentPortfolioId);
       await loadAssets(currentPortfolioId);
+      await loadNews();
     } catch (error) {
       console.error("Errore caricamento dashboard:", error);
       setErrorMessage(
@@ -125,7 +161,7 @@ export default function DashboardPage() {
     } finally {
       setIsPageLoading(false);
     }
-  }, [ensureDefaultPortfolio, loadAssets, router, supabase]);
+  }, [ensureDefaultPortfolio, loadAssets, loadNews, router, supabase]);
 
   useEffect(() => {
     const animationFrameId = window.requestAnimationFrame(() => {
@@ -227,6 +263,7 @@ export default function DashboardPage() {
       }
 
       await loadAssets(effectivePortfolioId);
+      await loadNews();
       resetAssetForm();
       setIsAddAssetModalOpen(false);
     } catch (error) {
@@ -330,6 +367,57 @@ export default function DashboardPage() {
             </table>
           </div>
         </div>
+      </section>
+
+      <section className="mx-auto w-full max-w-6xl px-4 pb-10 sm:px-6 lg:px-8">
+        <h2 className="mb-4 text-xl font-semibold tracking-tight">Notizie per te</h2>
+
+        {newsErrorMessage ? (
+          <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300">
+            {newsErrorMessage}
+          </p>
+        ) : null}
+
+        {isNewsLoading ? (
+          <div className="rounded-xl border border-zinc-200 bg-white p-6 text-sm text-zinc-500 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+            Caricamento notizie...
+          </div>
+        ) : news.length === 0 ? (
+          <div className="rounded-xl border border-zinc-200 bg-white p-6 text-sm text-zinc-500 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+            Nessuna notizia disponibile al momento per i tuoi asset.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            {news.map((item, index) => (
+              <article
+                key={`${item.ticker}-${item.url}-${index}`}
+                className="rounded-xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+              >
+                <div className="mb-3 inline-flex items-center rounded-full bg-blue-100 px-2.5 py-1 text-xs font-semibold text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
+                  {item.ticker}
+                </div>
+                <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+                  {item.titolo}
+                </h3>
+                <p className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-300">
+                  {item.riassunto}
+                </p>
+                <div className="mt-4 flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
+                  <span>{item.fonte}</span>
+                  <span>{new Date(item.data).toLocaleDateString("it-IT")}</span>
+                </div>
+                <a
+                  href={item.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-4 inline-flex text-sm font-medium text-blue-600 transition hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300"
+                >
+                  Leggi articolo
+                </a>
+              </article>
+            ))}
+          </div>
+        )}
       </section>
 
       {isAddAssetModalOpen ? (
