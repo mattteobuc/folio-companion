@@ -5,7 +5,6 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 import ReactMarkdown from "react-markdown";
 import { createClient } from "@/utils/supabase/client";
 
-// ── TYPES ────────────────────────────────────────────────────────
 type AssetRow = {
   id: string; ticker: string; name: string; asset_type: string;
   quantity: number; purchase_price: number; purchase_date: string | null; portfolio_id: string;
@@ -61,7 +60,6 @@ export default function DashboardPage() {
   const [isSavingAsset, setIsSavingAsset] = useState(false);
   const [userEmail, setUserEmail] = useState("");
 
-  // Portafogli
   const [portfolios, setPortfolios] = useState<PortfolioRow[]>([]);
   const [activePortfolioFilter, setActivePortfolioFilter] = useState<string>("all");
   const [isPortfolioMenuOpen, setIsPortfolioMenuOpen] = useState(false);
@@ -70,33 +68,27 @@ export default function DashboardPage() {
   const [isCreatingPortfolio, setIsCreatingPortfolio] = useState(false);
   const [newPortfolioName, setNewPortfolioName] = useState("");
   const [portfolioActionLoading, setPortfolioActionLoading] = useState(false);
-  // Stato collapsed per ogni portafoglio: id -> boolean
   const [collapsedPortfolios, setCollapsedPortfolios] = useState<Record<string, boolean>>({});
   const [allCollapsed, setAllCollapsed] = useState(false);
 
-  // Asset & prezzi
   const [assets, setAssets] = useState<AssetRow[]>([]);
   const [prices, setPrices] = useState<PricesMap>({});
   const [isPricesLoading, setIsPricesLoading] = useState(false);
   const [deletingAssetId, setDeletingAssetId] = useState<string | null>(null);
 
-  // Macro
   const [macroText, setMacroText] = useState("");
   const [macroTopics, setMacroTopics] = useState<MacroTopic[] | null>(null);
   const [macroDate, setMacroDate] = useState("");
   const [isMacroLoading, setIsMacroLoading] = useState(false);
   const [macroErrorMessage, setMacroErrorMessage] = useState<string | null>(null);
 
-  // Notizie
   const [news, setNews] = useState<NewsItem[]>([]);
   const [isNewsLoading, setIsNewsLoading] = useState(false);
   const [newsErrorMessage, setNewsErrorMessage] = useState<string | null>(null);
 
-  // Insight
   const [insights, setInsights] = useState<Insight[]>([]);
   const [isInsightsLoading, setIsInsightsLoading] = useState(false);
 
-  // Chat
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([{ role: "assistant", content: INITIAL_CHAT_MESSAGE }]);
   const [chatInput, setChatInput] = useState("");
   const [isSendingChat, setIsSendingChat] = useState(false);
@@ -107,12 +99,10 @@ export default function DashboardPage() {
   const [isLoadingSession, setIsLoadingSession] = useState(false);
   const [isChatExpanded, setIsChatExpanded] = useState(false);
 
-  // UI
   const [isAddAssetModalOpen, setIsAddAssetModalOpen] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>("portfolio");
 
-  // Form asset
   const [assetSearchQuery, setAssetSearchQuery] = useState("");
   const [assetSearchResults, setAssetSearchResults] = useState<SymbolSearchResult[]>([]);
   const [isSearchingSymbol, setIsSearchingSymbol] = useState(false);
@@ -131,8 +121,6 @@ export default function DashboardPage() {
   const symbolSearchContainerRef = useRef<HTMLDivElement | null>(null);
   const chatBottomRef = useRef<HTMLDivElement | null>(null);
   const portfolioMenuRef = useRef<HTMLDivElement | null>(null);
-
-  // Refs per anchor navigation
   const portfolioRef = useRef<HTMLDivElement | null>(null);
   const macroRef = useRef<HTMLDivElement | null>(null);
   const newsRef = useRef<HTMLDivElement | null>(null);
@@ -141,7 +129,6 @@ export default function DashboardPage() {
     ref.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
-  // ── COMPUTED ──────────────────────────────────────────────────
   const visiblePortfolios = useMemo(() =>
     activePortfolioFilter === "all" ? portfolios : portfolios.filter((p) => p.id === activePortfolioFilter),
   [portfolios, activePortfolioFilter]);
@@ -180,7 +167,6 @@ export default function DashboardPage() {
     setShowNewPortfolioInput(false); setModalNewPortfolioName(""); setIsAddAssetModalOpen(true);
   };
 
-  // Toggle collapsed
   const togglePortfolioCollapsed = (portfolioId: string) => {
     setCollapsedPortfolios((prev) => ({ ...prev, [portfolioId]: !prev[portfolioId] }));
   };
@@ -193,7 +179,6 @@ export default function DashboardPage() {
     setCollapsedPortfolios(newState);
   };
 
-  // ── DATA LOADING ──────────────────────────────────────────────
   const ensureDefaultPortfolio = useCallback(async (userId: string): Promise<PortfolioRow[]> => {
     const { data: existing, error } = await supabase.from("portfolios").select("id, name").eq("user_id", userId).order("created_at", { ascending: true });
     if (error) throw error;
@@ -302,7 +287,6 @@ export default function DashboardPage() {
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  // ── PORTFOLIO ACTIONS ─────────────────────────────────────────
   const handleCreatePortfolio = async (name: string): Promise<PortfolioRow | null> => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return null;
@@ -408,7 +392,6 @@ export default function DashboardPage() {
     finally { setIsSavingAsset(false); setIsFetchingHistoricalPrice(false); }
   };
 
-  // ── CHAT ─────────────────────────────────────────────────────
   const handleSendChatMessage = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const trimmedInput = chatInput.trim();
@@ -450,15 +433,12 @@ export default function DashboardPage() {
     const totals = computeTotals(groupAssets);
     const glp = totals.totalCost > 0 ? (totals.totalGainLoss / totals.totalCost) * 100 : 0;
     const pos = totals.totalGainLoss >= 0;
-
     return (
       <div className="overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-        {/* Header */}
         <div className="flex items-center justify-between border-b border-zinc-100 bg-zinc-50 px-4 py-3 dark:border-zinc-800 dark:bg-zinc-800/60">
           <div className="flex items-center gap-3 flex-1 min-w-0">
-            {/* Toggle collapse */}
             <button type="button" onClick={() => togglePortfolioCollapsed(portfolio.id)}
-              className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg text-zinc-400 transition hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300">
+              className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg text-zinc-400 transition hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700">
               <svg xmlns="http://www.w3.org/2000/svg" className={`h-4 w-4 transition-transform ${isCollapsed ? "-rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
               </svg>
@@ -470,7 +450,6 @@ export default function DashboardPage() {
             </div>
             <span className="font-semibold text-zinc-800 dark:text-zinc-100 truncate">{portfolio.name}</span>
             <span className="text-xs text-zinc-400 flex-shrink-0">{groupAssets.length} asset</span>
-            {/* Totale inline quando collassato */}
             {isCollapsed && totals.totalValue > 0 && (
               <div className="ml-2 flex items-center gap-2 flex-shrink-0">
                 <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-200">{formatCurrency(totals.totalValue)}</span>
@@ -483,15 +462,12 @@ export default function DashboardPage() {
             <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
           </button>
         </div>
-
-        {/* Contenuto collassabile */}
         {!isCollapsed && (
           <>
             {groupAssets.length === 0 ? (
               <div className="px-4 py-8 text-center text-sm text-zinc-400">Nessun asset. Clicca + per aggiungere.</div>
             ) : (
               <>
-                {/* Tabella desktop */}
                 <div className="hidden lg:block overflow-x-auto">
                   <table className="min-w-full divide-y divide-zinc-100 dark:divide-zinc-800">
                     <thead><tr className="text-left text-xs font-medium uppercase tracking-wider text-zinc-400">
@@ -526,7 +502,6 @@ export default function DashboardPage() {
                     </tbody>
                   </table>
                 </div>
-                {/* Card mobile */}
                 <div className="divide-y divide-zinc-100 lg:hidden dark:divide-zinc-800">
                   {groupAssets.map((asset) => {
                     const { currentValue, gainLoss, gainLossPercent } = getAssetMetrics(asset);
@@ -554,7 +529,6 @@ export default function DashboardPage() {
                     );
                   })}
                 </div>
-                {/* Footer totale */}
                 <div className="flex items-center justify-between border-t border-zinc-100 bg-zinc-50/80 px-4 py-3 dark:border-zinc-800 dark:bg-zinc-800/30">
                   <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400">Totale {portfolio.name}</span>
                   <div className="flex items-center gap-4 text-sm">
@@ -573,18 +547,21 @@ export default function DashboardPage() {
     );
   };
 
-  // ── MAIN SECTIONS ─────────────────────────────────────────────
-
+  // ── SECTIONS ──────────────────────────────────────────────────
   const PortfolioSection = (
-    <div ref={portfolioRef} className="scroll-mt-4">
+    <div ref={portfolioRef} className="scroll-mt-20">
       <div className="mb-3 flex items-center justify-between">
         <h1 className="text-xl font-semibold tracking-tight">Il mio portafoglio</h1>
         <div className="flex items-center gap-2">
-          {/* Collassa/espandi tutti */}
           {portfolios.length > 1 && (
-            <button type="button" onClick={toggleAllCollapsed}
-              className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-500 transition hover:border-zinc-300 hover:text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400">
-              {allCollapsed ? "Espandi tutti" : "Collassa tutti"}
+            <button type="button" onClick={toggleAllCollapsed} title={allCollapsed ? "Espandi tutti" : "Minimizza tutti"}
+              className="flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-400 transition hover:border-zinc-300 hover:text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                {allCollapsed
+                  ? <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5M3.75 3.75L9 9M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15m11.25 5.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
+                  : <path strokeLinecap="round" strokeLinejoin="round" d="M9 9V4.5M9 9H4.5M9 9L3.75 3.75M9 15v4.5M9 15H4.5M9 15l-5.25 5.25M15 9h4.5M15 9V4.5M15 9l5.25-5.25M15 15h4.5M15 15v4.5m0-4.5l5.25 5.25" />
+                }
+              </svg>
             </button>
           )}
           <button type="button" onClick={() => openAddAssetModal(activePortfolioFilter !== "all" ? activePortfolioFilter : undefined)}
@@ -609,7 +586,6 @@ export default function DashboardPage() {
             </button>
           ))}
         </div>
-        {/* Menu gestione */}
         <div className="relative" ref={portfolioMenuRef}>
           <button type="button" onClick={() => setIsPortfolioMenuOpen((v) => !v)} title="Gestisci portafogli"
             className="flex h-8 w-8 items-center justify-center rounded-full border border-zinc-200 bg-white text-zinc-400 transition hover:border-zinc-300 hover:text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900">
@@ -689,7 +665,7 @@ export default function DashboardPage() {
   );
 
   const MacroSection = (
-    <div ref={macroRef} className="scroll-mt-4 rounded-xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+    <div ref={macroRef} className="scroll-mt-20 rounded-xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
       <div className="mb-4 flex items-center justify-between gap-3">
         <h2 className="text-lg font-semibold tracking-tight">Contesto di mercato</h2>
         <button type="button" onClick={() => void loadMacroContext({ forceRefresh: true })} disabled={isMacroLoading}
@@ -724,7 +700,7 @@ export default function DashboardPage() {
   );
 
   const NewsSection = (
-    <div ref={newsRef} className="scroll-mt-4">
+    <div ref={newsRef} className="scroll-mt-20">
       <div className="mb-4 flex items-center justify-between gap-3">
         <h2 className="text-xl font-semibold tracking-tight">Notizie per te</h2>
         <button type="button" onClick={() => void loadNews()} disabled={isNewsLoading}
@@ -759,7 +735,6 @@ export default function DashboardPage() {
   // ── COMPANION PANEL ───────────────────────────────────────────
   const CompanionPanel = (
     <div className="flex flex-col gap-4">
-      {/* Insight */}
       <div className="rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
         <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
           <h2 className="font-semibold tracking-tight">Insight del compagno</h2>
@@ -800,7 +775,6 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Chat */}
       <div className={`flex flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 ${isChatExpanded ? "fixed inset-4 z-50 shadow-2xl" : "relative"}`}
         style={isChatExpanded ? {} : { height: "480px" }}>
         <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
@@ -960,12 +934,38 @@ export default function DashboardPage() {
   // ── RENDER ────────────────────────────────────────────────────
   return (
     <main className="min-h-screen bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
-      <header className="border-b border-zinc-200 bg-white/90 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/90">
-        <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
-          <p className="text-base font-semibold tracking-tight text-blue-700 dark:text-blue-400">Folio Companion</p>
-          <div className="flex items-center gap-2">
-            <a href="/checkin" className="hidden rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 sm:inline-flex">Check-in</a>
-            <span className="hidden text-sm text-zinc-500 dark:text-zinc-400 sm:inline">{userEmail}</span>
+
+      {/* ── HEADER con nav centrale ── */}
+      <header className="sticky top-0 z-30 border-b border-zinc-200 bg-white/90 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/90">
+        <div className="mx-auto flex w-full max-w-6xl items-center px-4 py-3 sm:px-6 lg:px-8">
+
+          {/* Logo — fisso a sinistra */}
+          <p className="w-40 flex-shrink-0 text-base font-semibold tracking-tight text-blue-700 dark:text-blue-400">
+            Folio Companion
+          </p>
+
+          {/* Nav centrale — solo desktop */}
+          <nav className="hidden flex-1 items-center justify-center gap-1 lg:flex">
+            <button type="button" onClick={() => scrollTo(portfolioRef)}
+              className="rounded-lg px-4 py-1.5 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100">
+              Portafoglio
+            </button>
+            <button type="button" onClick={() => scrollTo(macroRef)}
+              className="rounded-lg px-4 py-1.5 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100">
+              Mercato
+            </button>
+            <button type="button" onClick={() => scrollTo(newsRef)}
+              className="rounded-lg px-4 py-1.5 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100">
+              Notizie
+            </button>
+          </nav>
+
+          {/* Azioni destra */}
+          <div className="flex w-40 flex-shrink-0 items-center justify-end gap-2">
+            <a href="/checkin" className="hidden rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 sm:inline-flex">
+              Check-in
+            </a>
+            <span className="hidden text-sm text-zinc-500 dark:text-zinc-400 lg:inline">{userEmail}</span>
             <button type="button" onClick={handleLogout} disabled={isLoggingOut}
               className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
               {isLoggingOut ? "..." : "Logout"}
@@ -979,11 +979,11 @@ export default function DashboardPage() {
         <div className="px-4 py-6 pb-24">
           {mobileTab === "portfolio" && (
             <div className="space-y-6">
-              {/* Anchor menu mobile */}
+              {/* Anchor menu mobile — solo nella tab portafoglio */}
               <div className="flex items-center gap-2 overflow-x-auto pb-1">
-                <button type="button" onClick={() => scrollTo(portfolioRef)} className="flex-shrink-0 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 transition hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-900">📊 Portafoglio</button>
-                <button type="button" onClick={() => scrollTo(macroRef)} className="flex-shrink-0 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 transition hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-900">🌍 Mercato</button>
-                <button type="button" onClick={() => scrollTo(newsRef)} className="flex-shrink-0 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 transition hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-900">📰 Notizie</button>
+                <button type="button" onClick={() => scrollTo(portfolioRef)} className="flex-shrink-0 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-900">📊 Portafoglio</button>
+                <button type="button" onClick={() => scrollTo(macroRef)} className="flex-shrink-0 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-900">🌍 Mercato</button>
+                <button type="button" onClick={() => scrollTo(newsRef)} className="flex-shrink-0 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-900">📰 Notizie</button>
               </div>
               {PortfolioSection}
               {MacroSection}
@@ -1014,24 +1014,8 @@ export default function DashboardPage() {
         </nav>
       </div>
 
-      {/* Desktop */}
+      {/* Desktop — niente anchor menu esterno, è già nell'header */}
       <section className="mx-auto hidden w-full max-w-6xl px-4 py-8 sm:px-6 lg:block lg:px-8">
-        {/* Anchor menu desktop */}
-        <div className="mb-6 flex items-center gap-2">
-          <button type="button" onClick={() => scrollTo(portfolioRef)}
-            className="flex items-center gap-1.5 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-sm font-medium text-zinc-600 transition hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
-            <span>📊</span> Portafoglio
-          </button>
-          <button type="button" onClick={() => scrollTo(macroRef)}
-            className="flex items-center gap-1.5 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-sm font-medium text-zinc-600 transition hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
-            <span>🌍</span> Mercato
-          </button>
-          <button type="button" onClick={() => scrollTo(newsRef)}
-            className="flex items-center gap-1.5 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-sm font-medium text-zinc-600 transition hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
-            <span>📰</span> Notizie
-          </button>
-        </div>
-
         <div className="grid grid-cols-1 gap-8 lg:grid-cols-5 lg:items-start">
           <div className="space-y-8 lg:col-span-3">
             {PortfolioSection}
