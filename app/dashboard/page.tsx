@@ -88,6 +88,7 @@ export default function DashboardPage() {
 
   const [insights, setInsights] = useState<Insight[]>([]);
   const [isInsightsLoading, setIsInsightsLoading] = useState(false);
+  const [expandedInsightIds, setExpandedInsightIds] = useState<Record<number, boolean>>({});
 
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([{ role: "assistant", content: INITIAL_CHAT_MESSAGE }]);
   const [chatInput, setChatInput] = useState("");
@@ -98,6 +99,7 @@ export default function DashboardPage() {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isLoadingSession, setIsLoadingSession] = useState(false);
   const [isChatExpanded, setIsChatExpanded] = useState(false);
+  const [isChatMinimized, setIsChatMinimized] = useState(false);
 
   const [isAddAssetModalOpen, setIsAddAssetModalOpen] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -249,9 +251,16 @@ export default function DashboardPage() {
     try {
       const res = await fetch("/api/insights", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ news: currentNews }) });
       const payload = (await res.json()) as { insights?: Insight[] };
-      if (res.ok && payload.insights) setInsights(payload.insights);
+      if (res.ok && payload.insights) {
+        setInsights(payload.insights);
+        setExpandedInsightIds({});
+      }
     } catch (e) { console.error(e); } finally { setIsInsightsLoading(false); }
   }, []);
+
+  const toggleInsightExpanded = (index: number) => {
+    setExpandedInsightIds((prev) => ({ ...prev, [index]: !prev[index] }));
+  };
 
   const loadChatSessions = useCallback(async () => {
     const { data } = await supabase.from("chat_sessions").select("id, title, updated_at").order("updated_at", { ascending: false }).limit(20);
@@ -286,6 +295,16 @@ export default function DashboardPage() {
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
+
+  useEffect(() => {
+    if (!isChatExpanded) return;
+    // Evita doppi scroll quando la chat è in modalità overlay.
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isChatExpanded]);
 
   const handleCreatePortfolio = async (name: string): Promise<PortfolioRow | null> => {
     const { data: { user } } = await supabase.auth.getUser();
@@ -424,6 +443,16 @@ export default function DashboardPage() {
   const handleNewChat = () => {
     setChatMessages([{ role: "assistant", content: INITIAL_CHAT_MESSAGE }]);
     setCurrentSessionId(null); setChatErrorMessage(null); setIsHistoryOpen(false);
+  };
+
+  const handleMinimizeChat = () => {
+    setIsChatExpanded(false);
+    setIsHistoryOpen(false);
+    setIsChatMinimized(true);
+  };
+
+  const handleRestoreChat = () => {
+    setIsChatMinimized(false);
   };
 
   // ── PORTFOLIO GROUP CARD ──────────────────────────────────────
@@ -732,71 +761,103 @@ export default function DashboardPage() {
     </div>
   );
 
+  const InsightsSection = (
+    <div className="rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
+        <h2 className="font-semibold tracking-tight">Insight del compagno</h2>
+        <button type="button" onClick={() => void loadInsights(news)} disabled={isInsightsLoading}
+          className="inline-flex items-center rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 transition hover:border-blue-300 hover:text-blue-600 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
+          {isInsightsLoading ? "Aggiornamento..." : "Aggiorna"}
+        </button>
+      </div>
+      <div className="p-3">
+        {isInsightsLoading ? (
+          <div className="space-y-2">{[1, 2].map((i) => <div key={i} className="animate-pulse rounded-lg bg-zinc-100 p-3 dark:bg-zinc-800"><div className="mb-1.5 h-3 w-1/3 rounded bg-zinc-200 dark:bg-zinc-700" /><div className="h-3 w-full rounded bg-zinc-200 dark:bg-zinc-700" /></div>)}</div>
+        ) : insights.length === 0 ? (
+          <p className="px-1 py-4 text-center text-sm text-zinc-400">Nessun insight. Clicca Aggiorna per generarli.</p>
+        ) : (
+          <div className="space-y-2">
+            {insights.map((insight, i) => (
+              <article key={i} className={`rounded-lg border ${insight.tipo === "attenzione" ? "border-amber-100 bg-amber-50 dark:border-amber-900/30 dark:bg-amber-950/20" : insight.tipo === "opportunità" ? "border-blue-100 bg-blue-50 dark:border-blue-900/30 dark:bg-blue-950/20" : "border-zinc-100 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-800/50"}`}>
+                <button
+                  type="button"
+                  onClick={() => toggleInsightExpanded(i)}
+                  aria-expanded={Boolean(expandedInsightIds[i])}
+                  aria-controls={`insight-content-${i}`}
+                  className="flex w-full items-center gap-2 px-3 py-2.5 text-left"
+                >
+                  <InsightIcon tipo={insight.tipo} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="truncate text-sm font-semibold text-zinc-800 dark:text-zinc-100">{insight.titolo}</span>
+                      {insight.ticker && <span className="rounded-full bg-blue-100 px-1.5 py-0.5 text-xs font-semibold text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">{insight.ticker}</span>}
+                    </div>
+                  </div>
+                  <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                    {expandedInsightIds[i] ? "Riduci" : "Dettagli"}
+                  </span>
+                </button>
+                {expandedInsightIds[i] && (
+                  <div id={`insight-content-${i}`} className="border-t border-zinc-200/70 px-3 pb-3 pt-2 dark:border-zinc-700/60">
+                    <p className="text-xs leading-5 text-zinc-600 dark:text-zinc-300">{insight.contenuto}</p>
+                    {insight.news_url && (
+                      <a href={insight.news_url} target="_blank" rel="noopener noreferrer" className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" /></svg>
+                        {insight.news_titolo ?? "Apri fonte"}
+                      </a>
+                    )}
+                  </div>
+                )}
+              </article>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
   // ── COMPANION PANEL ───────────────────────────────────────────
   const CompanionPanel = (
     <div className="flex flex-col gap-4">
-      <div className="rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-        <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
-          <h2 className="font-semibold tracking-tight">Insight del compagno</h2>
-          <button type="button" onClick={() => void loadInsights(news)} disabled={isInsightsLoading}
-            className="inline-flex items-center rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 transition hover:border-blue-300 hover:text-blue-600 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
-            {isInsightsLoading ? "Aggiornamento..." : "Aggiorna"}
-          </button>
-        </div>
-        <div className="p-3">
-          {isInsightsLoading ? (
-            <div className="space-y-2">{[1, 2].map((i) => <div key={i} className="animate-pulse rounded-lg bg-zinc-100 p-3 dark:bg-zinc-800"><div className="mb-1.5 h-3 w-1/3 rounded bg-zinc-200 dark:bg-zinc-700" /><div className="h-3 w-full rounded bg-zinc-200 dark:bg-zinc-700" /></div>)}</div>
-          ) : insights.length === 0 ? (
-            <p className="px-1 py-4 text-center text-sm text-zinc-400">Nessun insight. Clicca Aggiorna per generarli.</p>
-          ) : (
-            <div className="space-y-2">
-              {insights.map((insight, i) => (
-                <div key={i} className={`rounded-lg border p-3 ${insight.tipo === "attenzione" ? "border-amber-100 bg-amber-50 dark:border-amber-900/30 dark:bg-amber-950/20" : insight.tipo === "opportunità" ? "border-blue-100 bg-blue-50 dark:border-blue-900/30 dark:bg-blue-950/20" : "border-zinc-100 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-800/50"}`}>
-                  <div className="flex items-start gap-2">
-                    <InsightIcon tipo={insight.tipo} />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">{insight.titolo}</span>
-                        {insight.ticker && <span className="rounded-full bg-blue-100 px-1.5 py-0.5 text-xs font-semibold text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">{insight.ticker}</span>}
-                      </div>
-                      <p className="mt-1 text-xs leading-5 text-zinc-600 dark:text-zinc-300">{insight.contenuto}</p>
-                      {insight.news_url && (
-                        <a href={insight.news_url} target="_blank" rel="noopener noreferrer" className="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400">
-                          <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" /></svg>
-                          {insight.news_titolo ?? "Leggi notizia"}
-                        </a>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
 
-      <div className={`flex flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 ${isChatExpanded ? "fixed inset-4 z-50 shadow-2xl" : "relative"}`}
-        style={isChatExpanded ? {} : { height: "480px" }}>
-        <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
-          <div className="flex items-center gap-2">
+      <div
+        className={`fixed z-50 flex flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg dark:border-zinc-800 dark:bg-zinc-900 ${isChatExpanded ? "inset-4 shadow-2xl" : "bottom-20 left-2 right-2 h-[58vh] max-h-[620px] sm:bottom-4 sm:left-auto sm:right-4 sm:h-[560px] sm:w-[420px]"}`}
+      >
+        <div className="flex items-center justify-between gap-2 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
+          <div className="flex min-w-0 items-center gap-2">
             <button type="button" onClick={() => setIsHistoryOpen((v) => !v)} title="Storico"
               className={`flex h-7 w-7 items-center justify-center rounded-lg border transition ${isHistoryOpen ? "border-blue-300 bg-blue-50 text-blue-600 dark:border-blue-700 dark:bg-blue-900/20" : "border-zinc-200 bg-white text-zinc-400 hover:border-zinc-300 hover:text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900"}`}>
               <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" /></svg>
             </button>
-            <h2 className="text-sm font-semibold">Compagno</h2>
+            <h2 className="truncate text-sm font-semibold">Compagno</h2>
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex shrink-0 items-center gap-1.5">
+            {!isChatExpanded && (
+              <button type="button" onClick={handleMinimizeChat} title="Minimizza"
+                className="flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-400 transition hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-900">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14" /></svg>
+              </button>
+            )}
+            {isChatExpanded && (
+              <button
+                type="button"
+                onClick={() => setIsChatExpanded(false)}
+                aria-label="Riduci la chat"
+                className="inline-flex items-center rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700 transition hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-900/30 dark:text-blue-300"
+              >
+                Riduci
+              </button>
+            )}
             <button type="button" onClick={handleNewChat} title="Nuova chat"
               className="flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-400 transition hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-900">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
             </button>
-            <button type="button" onClick={() => setIsChatExpanded((v) => !v)} title={isChatExpanded ? "Riduci" : "Espandi"}
-              className="flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-400 transition hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-900">
-              {isChatExpanded
-                ? <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 9V4.5M9 9H4.5M9 9L3.75 3.75M9 15v4.5M9 15H4.5M9 15l-5.25 5.25M15 9h4.5M15 9V4.5M15 9l5.25-5.25M15 15h4.5M15 15v4.5m0-4.5l5.25 5.25" /></svg>
-                : <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" /></svg>
-              }
-            </button>
+            {!isChatExpanded && (
+              <button type="button" onClick={() => setIsChatExpanded(true)} title="Espandi"
+                className="flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-400 transition hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-900">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" /></svg>
+              </button>
+            )}
           </div>
         </div>
         <div className="flex flex-1 overflow-hidden">
@@ -860,6 +921,18 @@ export default function DashboardPage() {
       </div>
       {isChatExpanded && <div className="fixed inset-0 z-40 bg-zinc-950/40 backdrop-blur-sm" onClick={() => setIsChatExpanded(false)} />}
     </div>
+  );
+
+  const ChatLauncher = (
+    <button
+      type="button"
+      onClick={handleRestoreChat}
+      className="fixed bottom-24 right-3 z-50 inline-flex items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-lg transition hover:bg-blue-500 sm:bottom-4 sm:right-4"
+      aria-label="Apri il compagno"
+    >
+      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 01.865-.501 48.172 48.172 0 003.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" /></svg>
+      Compagno
+    </button>
   );
 
   // ── ADD ASSET MODAL ───────────────────────────────────────────
@@ -979,6 +1052,7 @@ export default function DashboardPage() {
         <div className="px-4 py-6 pb-24">
           {mobileTab === "portfolio" && (
             <div className="space-y-6">
+              {InsightsSection}
               {/* Anchor menu mobile — solo nella tab portafoglio */}
               <div className="flex items-center gap-2 overflow-x-auto pb-1">
                 <button type="button" onClick={() => scrollTo(portfolioRef)} className="flex-shrink-0 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-900">📊 Portafoglio</button>
@@ -991,7 +1065,11 @@ export default function DashboardPage() {
             </div>
           )}
           {mobileTab === "news" && NewsSection}
-          {mobileTab === "chat" && <div style={{ height: "calc(100vh - 10rem)" }}>{CompanionPanel}</div>}
+          {mobileTab === "chat" && (
+            <div className="rounded-xl border border-zinc-200 bg-white p-4 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
+              Il Compagno e sempre visibile in sovraimpressione.
+            </div>
+          )}
         </div>
         <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-zinc-200 bg-white/95 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/95">
           <div className="flex">
@@ -1015,16 +1093,16 @@ export default function DashboardPage() {
       </div>
 
       {/* Desktop — niente anchor menu esterno, è già nell'header */}
-      <section className="mx-auto hidden w-full max-w-6xl px-4 py-8 sm:px-6 lg:block lg:px-8">
-        <div className="grid grid-cols-1 gap-8 lg:grid-cols-5 lg:items-start">
-          <div className="space-y-8 lg:col-span-3">
-            {PortfolioSection}
-            {MacroSection}
-            {NewsSection}
-          </div>
-          <aside className="lg:col-span-2 lg:sticky lg:top-24">{CompanionPanel}</aside>
+      <section className="mx-auto hidden w-full max-w-6xl px-4 py-8 pb-[620px] sm:px-6 lg:block lg:px-8">
+        <div className="space-y-8">
+          {InsightsSection}
+          {PortfolioSection}
+          {MacroSection}
+          {NewsSection}
         </div>
       </section>
+
+      {isChatMinimized ? ChatLauncher : CompanionPanel}
 
       {AddAssetModal}
     </main>
