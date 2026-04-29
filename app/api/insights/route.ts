@@ -11,6 +11,19 @@ type NewsItem = {
   riassunto: string;
 };
 
+type DiaryRow = {
+  notes: string | null;
+  mood: number | null;
+  created_at: string;
+  context_type: string | null;
+  asset_id: string | null;
+};
+
+type DiaryAssetRow = {
+  id: string;
+  ticker: string;
+};
+
 export async function POST(request: Request) {
   try {
     const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
@@ -51,13 +64,45 @@ export async function POST(request: Request) {
         ).join("\n\n")
       : "Nessuna notizia recente disponibile.";
 
+    const { data: diaryRows } = await supabase
+      .from("checkins")
+      .select("notes, mood, created_at, context_type, asset_id")
+      .eq("user_id", user.id)
+      .not("notes", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(6);
+    const typedDiaryRows = ((diaryRows ?? []) as DiaryRow[]).filter((row) => row.notes?.trim());
+    let diaryContext = "Nessuna nota diario recente.";
+    if (typedDiaryRows.length > 0) {
+      const assetIds = Array.from(new Set(typedDiaryRows.map((row) => row.asset_id).filter(Boolean))) as string[];
+      const assetTickerById = new Map<string, string>();
+      if (assetIds.length > 0) {
+        const { data: assetRows } = await supabase
+          .from("assets")
+          .select("id, ticker")
+          .in("id", assetIds);
+        ((assetRows ?? []) as DiaryAssetRow[]).forEach((asset) => {
+          if (asset.id && asset.ticker) assetTickerById.set(asset.id, asset.ticker);
+        });
+      }
+      diaryContext = typedDiaryRows.map((row) => {
+        const date = new Date(row.created_at).toLocaleDateString("it-IT");
+        const mood = row.mood ? `${row.mood}/5` : "n/d";
+        const ticker = row.asset_id ? assetTickerById.get(row.asset_id) : null;
+        const contextLabel = row.context_type ?? "free_note";
+        return `- ${date} | mood ${mood} | ${ticker ? `${ticker} | ` : ""}${contextLabel}: ${row.notes?.trim()}`;
+      }).join("\n");
+    }
+
     const prompt =
       `Il portafoglio contiene: ${tickers.join(", ")}.\n\n` +
       `Notizie recenti rilevanti:\n${newsContext}\n\n` +
+      `Estratti dal diario personale:\n${diaryContext}\n\n` +
       `Genera esattamente 2-3 insight proattivi per l'investitore. Ogni insight deve:\n` +
       `- Essere diretto e specifico (menziona il ticker)\n` +
       `- Spiegare perché è rilevante ADESSO\n` +
       `- Essere scritto come un amico esperto che ti avvisa di qualcosa\n` +
+      `- Tenere conto del tono emotivo emerso dal diario per essere empatico ma non paternalista\n` +
       `- NON dare mai consigli di acquisto o vendita\n\n` +
       `Rispondi SOLO con un array JSON valido in questo formato:\n` +
       `[\n` +

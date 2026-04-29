@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
@@ -8,6 +9,7 @@ import { createClient } from "@/utils/supabase/client";
 type AssetRow = {
   id: string; ticker: string; name: string; asset_type: string;
   quantity: number; purchase_price: number; purchase_date: string | null; portfolio_id: string;
+  source_platform?: string; external_symbol?: string | null; import_batch_id?: string | null;
 };
 type PortfolioRow = { id: string; name: string };
 type NewsItem = { ticker: string; titolo: string; fonte: string; url: string; data: string; riassunto: string };
@@ -22,51 +24,63 @@ type TutorialStep = {
   id: string;
   title: string;
   description: string;
-  target: "portfolio" | "insights" | "signals" | "macro" | "news" | "chat" | "analysis";
+  target: "portfolio" | "insights" | "signals" | "macro" | "news" | "chat" | "import" | "analysis" | "diary";
 };
 
 const TUTORIAL_STEPS: TutorialStep[] = [
   {
-    id: "portfolio",
-    title: "Il tuo portafoglio",
-    description: "Qui trovi asset, performance e organizzazione per portafoglio. Da qui puoi aggiungere o modificare rapidamente le posizioni.",
-    target: "portfolio",
-  },
-  {
-    id: "signals",
-    title: "Segnali del compagno",
-    description: "Questi sono alert conversazionali, contestualizzati al tuo portafoglio. Non sono segnali di trading, ma spunti di consapevolezza.",
-    target: "signals",
+    id: "chat",
+    title: "Mate conversazionale",
+    description: "Questa e la tua area di confronto: puoi fare domande, chiarire dubbi e analizzare scenari insieme al mate, senza consigli buy/sell.",
+    target: "chat",
   },
   {
     id: "insights",
-    title: "Insight sintetici",
-    description: "Una vista rapida dei punti importanti del momento. Puoi espandere ogni card quando vuoi più dettaglio.",
+    title: "Insight rapidi",
+    description: "Questi sono i punti chiave del momento in formato super sintetico. Se vuoi, apri la card e vai piu a fondo.",
     target: "insights",
+  },
+  {
+    id: "signals",
+    title: "Segnali del mate",
+    description: "Qui trovi segnali contestualizzati al tuo portafoglio: niente allarmismi, solo spunti utili per leggere meglio quello che succede.",
+    target: "signals",
+  },
+  {
+    id: "portfolio",
+    title: "Il tuo portafoglio",
+    description: "Qua trovi i tuoi asset: puoi aggiungerli, modificarli e tenerli monitorati giorno per giorno.",
+    target: "portfolio",
+  },
+  {
+    id: "import",
+    title: "Importa con il Mate",
+    description: "Da qui puoi importare CSV o screenshot. Il Mate ti guida, evita duplicati nella stessa piattaforma e portafoglio e ti chiede conferma quando i dati non sono chiari.",
+    target: "import",
+  },
+  {
+    id: "analysis",
+    title: "Analisi dedicata",
+    description: "Qui trovi il pulsante per aprire l'analisi avanzata in una pagina separata. Durante il tutorial lo evidenziamo soltanto.",
+    target: "analysis",
+  },
+  {
+    id: "diary",
+    title: "Diario personale",
+    description: "Qui salvi emozioni e riflessioni legate alle tue scelte. Il Mate usa queste note per darti insight piu empatici e contestuali.",
+    target: "diary",
   },
   {
     id: "macro",
     title: "Contesto di mercato",
-    description: "Qui vedi una sintesi macro in linguaggio semplice per capire il contesto prima di reagire emotivamente.",
+    description: "Qua hai una lettura macro in linguaggio semplice, cosi capisci il quadro prima di reagire di impulso.",
     target: "macro",
   },
   {
     id: "news",
     title: "Notizie per te",
-    description: "Notizie rilevanti per i tuoi ticker, con riassunti leggibili e pulsante per parlarne subito con il compagno.",
+    description: "Notizie rilevanti per i tuoi ticker, con riassunti chiari e scorciatoia per parlarne subito con il mate.",
     target: "news",
-  },
-  {
-    id: "chat",
-    title: "Compagno conversazionale",
-    description: "La chat è il cuore dell’app: puoi aprire discussioni contestuali e ricevere spiegazioni proattive senza consigli buy/sell.",
-    target: "chat",
-  },
-  {
-    id: "analysis",
-    title: "Analisi dedicata",
-    description: "Con il pulsante Analisi apri una pagina separata con approfondimenti su performance e moduli futuri.",
-    target: "analysis",
   },
 ];
 type ConversationalSignal = {
@@ -82,12 +96,28 @@ type Insight = {
   tipo?: "attenzione" | "opportunità" | "info";
   news_url?: string | null; news_titolo?: string | null;
 };
+type ImportCandidateRow = {
+  name: string;
+  ticker: string | null;
+  quantity: number | null;
+  purchase_price: number | null;
+  purchase_date: string | null;
+  sourceFile: string;
+  needs_review: boolean;
+  reason?: string;
+};
+type ImportOutcome = {
+  imported: number;
+  duplicates: number;
+  needsReview: number;
+  reviewRows: ImportCandidateRow[];
+};
 
 const MACRO_CACHE_KEY = "folio:macro-context:v2";
 const MACRO_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const NEWS_SUMMARY_CACHE_KEY = "folio:news-summaries:v1";
 const TUTORIAL_COMPLETED_LOCAL_KEY = "folio:tutorial-completed:v1";
-const INITIAL_CHAT_MESSAGE = "Ciao! Sono il tuo compagno finanziario. Puoi chiedermi tutto sul tuo portafoglio, sulle notizie di mercato o sugli eventi macro. Non ti darò mai consigli diretti di acquisto o vendita, ma ti aiuterò a capire meglio il contesto.";
+const INITIAL_CHAT_MESSAGE = "Ciao! Sono il tuo mate finanziario. Puoi chiedermi tutto sul tuo portafoglio, sulle notizie di mercato o sugli eventi macro. Non ti daro mai consigli diretti di acquisto o vendita, ma ti aiutero a capire meglio il contesto.";
 
 function SentimentBadge({ sentiment }: { sentiment: string }) {
   const s = sentiment.toLowerCase();
@@ -184,6 +214,14 @@ export default function DashboardPage() {
   const [selectedPortfolioId, setSelectedPortfolioId] = useState<string>("");
   const [showNewPortfolioInput, setShowNewPortfolioInput] = useState(false);
   const [modalNewPortfolioName, setModalNewPortfolioName] = useState("");
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+  const [importPlatform, setImportPlatform] = useState("");
+  const [importFiles, setImportFiles] = useState<File[]>([]);
+  const [importDestinationType, setImportDestinationType] = useState<"existing" | "new">("existing");
+  const [importPortfolioId, setImportPortfolioId] = useState("");
+  const [importNewPortfolioName, setImportNewPortfolioName] = useState("");
+  const [isImportingAssets, setIsImportingAssets] = useState(false);
+  const [importReport, setImportReport] = useState<ImportOutcome | null>(null);
 
   const supabase = useMemo(() => createClient(), []);
   const symbolSearchContainerRef = useRef<HTMLDivElement | null>(null);
@@ -196,6 +234,8 @@ export default function DashboardPage() {
   const macroRef = useRef<HTMLDivElement | null>(null);
   const newsRef = useRef<HTMLDivElement | null>(null);
   const chatRef = useRef<HTMLDivElement | null>(null);
+  const diaryButtonRef = useRef<HTMLAnchorElement | null>(null);
+  const importButtonRef = useRef<HTMLButtonElement | null>(null);
   const analysisButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const scrollTo = (ref: React.RefObject<HTMLDivElement | null>) => {
@@ -270,9 +310,21 @@ export default function DashboardPage() {
 
   const loadAssets = useCallback(async (portfolioIds: string[]): Promise<AssetRow[]> => {
     if (portfolioIds.length === 0) { setAssets([]); return []; }
-    const { data, error } = await supabase.from("assets").select("id, ticker, name, asset_type, quantity, purchase_price, purchase_date, portfolio_id").in("portfolio_id", portfolioIds).order("created_at", { ascending: false });
-    if (error) throw error;
-    const rows = (data ?? []) as AssetRow[]; setAssets(rows); return rows;
+    const latestSelect = "id, ticker, name, asset_type, quantity, purchase_price, purchase_date, portfolio_id, source_platform, external_symbol, import_batch_id";
+    const legacySelect = "id, ticker, name, asset_type, quantity, purchase_price, purchase_date, portfolio_id";
+    const latestResult = await supabase.from("assets").select(latestSelect).in("portfolio_id", portfolioIds).order("created_at", { ascending: false });
+    if (!latestResult.error) {
+      const rows = (latestResult.data ?? []) as AssetRow[];
+      setAssets(rows);
+      return rows;
+    }
+
+    // Fallback compatibile con DB non ancora migrato alle nuove colonne import.
+    const legacyResult = await supabase.from("assets").select(legacySelect).in("portfolio_id", portfolioIds).order("created_at", { ascending: false });
+    if (legacyResult.error) throw latestResult.error;
+    const rows = (legacyResult.data ?? []) as AssetRow[];
+    setAssets(rows);
+    return rows;
   }, [supabase]);
 
   const loadPrices = useCallback(async (assetList: AssetRow[]) => {
@@ -417,12 +469,10 @@ export default function DashboardPage() {
 
   const goToTutorialStep = (nextIndex: number) => {
     const boundedIndex = Math.max(0, Math.min(nextIndex, tutorialSteps.length - 1));
-    const step = tutorialSteps[boundedIndex];
-    if (step?.target === "chat") {
-      setIsChatMinimized(false);
-      setIsChatExpanded(true);
-      setMobileTab("chat");
-    }
+    const target = tutorialSteps[boundedIndex]?.target;
+    if (target === "news") setMobileTab("news");
+    else if (target === "chat") setMobileTab("chat");
+    else setMobileTab("portfolio");
     setTutorialStepIndex(boundedIndex);
   };
 
@@ -549,24 +599,26 @@ export default function DashboardPage() {
     if (!isTutorialOpen) return;
     const step = tutorialSteps[tutorialStepIndex];
     if (!step) return;
-    if (step.target === "chat") {
-      window.requestAnimationFrame(() => {
-        chatRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-      });
-      return;
-    }
-    if (step.target === "analysis") {
-      analysisButtonRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-      return;
-    }
-    const refMap: Record<Exclude<TutorialStep["target"], "chat" | "analysis">, React.RefObject<HTMLDivElement | null>> = {
-      portfolio: portfolioRef,
-      insights: insightsRef,
-      signals: signalsRef,
-      macro: macroRef,
-      news: newsRef,
+    const getTargetNode = () => {
+      if (step.target === "chat") return chatRef.current;
+      if (step.target === "analysis") return analysisButtonRef.current;
+      if (step.target === "import") return importButtonRef.current;
+      if (step.target === "diary") return diaryButtonRef.current;
+      const refMap: Record<Exclude<TutorialStep["target"], "chat" | "analysis" | "import" | "diary">, React.RefObject<HTMLDivElement | null>> = {
+        portfolio: portfolioRef,
+        insights: insightsRef,
+        signals: signalsRef,
+        macro: macroRef,
+        news: newsRef,
+      };
+      return refMap[step.target]?.current ?? null;
     };
-    refMap[step.target]?.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        getTargetNode()?.scrollIntoView({ behavior: "smooth", block: "center" });
+      });
+    });
   }, [isTutorialOpen, tutorialStepIndex, tutorialSteps, portfolioRef, insightsRef, signalsRef, macroRef, newsRef]);
 
   const handleCreatePortfolio = async (name: string): Promise<PortfolioRow | null> => {
@@ -615,6 +667,229 @@ export default function DashboardPage() {
     setAssetSearchQuery(""); setAssetSearchResults([]); setShowSymbolDropdown(false);
     setSymbolSearchMessage(null); setSelectedAsset(null); setInvestedAmount("");
     setPurchaseDate(""); setHistoricalPriceError(null); setShowNewPortfolioInput(false); setModalNewPortfolioName("");
+  };
+
+  const resetImportForm = () => {
+    setImportPlatform("");
+    setImportFiles([]);
+    setImportDestinationType("existing");
+    setImportPortfolioId(portfolios[0]?.id ?? "");
+    setImportNewPortfolioName("");
+  };
+
+  const openImportModal = () => {
+    resetImportForm();
+    setImportPortfolioId(portfolios[0]?.id ?? "");
+    setIsImportModalOpen(true);
+  };
+
+  const normalizeIdentifier = (value: string | null | undefined) =>
+    (value ?? "").trim().toUpperCase().replace(/\s+/g, " ");
+
+  const parseNumberValue = (raw: string | undefined): number | null => {
+    if (!raw) return null;
+    const normalized = raw.replace(/\./g, "").replace(",", ".").replace(/[^\d.-]/g, "");
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
+  const parseDateValue = (raw: string | undefined): string | null => {
+    if (!raw) return null;
+    const trimmed = raw.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+    const parts = trimmed.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})$/);
+    if (!parts) return null;
+    const day = parts[1].padStart(2, "0");
+    const month = parts[2].padStart(2, "0");
+    const year = parts[3].length === 2 ? `20${parts[3]}` : parts[3];
+    return `${year}-${month}-${day}`;
+  };
+
+  const parseCsvRows = async (file: File): Promise<ImportCandidateRow[]> => {
+    const text = await file.text();
+    const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (lines.length < 2) return [];
+    const separator = lines[0].includes(";") ? ";" : ",";
+    const headers = lines[0].split(separator).map((header) => header.trim().toLowerCase());
+    const getIndex = (aliases: string[]) =>
+      headers.findIndex((header) => aliases.some((alias) => header.includes(alias)));
+    const nameIndex = getIndex(["nome", "name", "titolo", "strumento", "asset"]);
+    const tickerIndex = getIndex(["ticker", "symbol", "simbolo", "isin"]);
+    const quantityIndex = getIndex(["quant", "qty", "shares", "pezzi"]);
+    const purchasePriceIndex = getIndex(["prezzo medio", "avg", "prezzo", "carico", "cost"]);
+    const purchaseDateIndex = getIndex(["data", "date"]);
+
+    return lines.slice(1).map((line) => {
+      const cols = line.split(separator).map((col) => col.trim());
+      const name = nameIndex >= 0 ? cols[nameIndex] ?? "" : "";
+      const ticker = tickerIndex >= 0 ? cols[tickerIndex] ?? "" : "";
+      const quantity = quantityIndex >= 0 ? parseNumberValue(cols[quantityIndex]) : null;
+      const purchasePrice = purchasePriceIndex >= 0 ? parseNumberValue(cols[purchasePriceIndex]) : null;
+      const purchaseDate = purchaseDateIndex >= 0 ? parseDateValue(cols[purchaseDateIndex]) : null;
+      const needsReview = !name || !quantity || !purchasePrice;
+      return {
+        sourceFile: file.name,
+        name: name || "Titolo da confermare",
+        ticker: ticker ? normalizeIdentifier(ticker) : null,
+        quantity,
+        purchase_price: purchasePrice,
+        purchase_date: purchaseDate,
+        needs_review: needsReview,
+        reason: needsReview ? "Dati incompleti nel CSV: servono nome, quantita e prezzo medio." : undefined,
+      };
+    });
+  };
+
+  const buildDedupeKey = (row: { ticker: string | null; name: string; sourcePlatform: string; portfolioId: string }) => {
+    const tickerOrName = normalizeIdentifier(row.ticker) || normalizeIdentifier(row.name);
+    return `${tickerOrName}::${normalizeIdentifier(row.sourcePlatform)}::${row.portfolioId}`;
+  };
+
+  const askMateForReviewRows = (rows: ImportCandidateRow[]) => {
+    if (rows.length === 0) return;
+    const sample = rows.slice(0, 3).map((row) => row.name).join(", ");
+    setChatInput(`Mate, ho importato alcuni titoli ma mancano dati da confermare (${sample}). Mi aiuti a verificare ticker, quantita e prezzo medio senza inventare nulla?`);
+    setIsChatMinimized(false);
+    setIsChatExpanded(true);
+    setTimeout(() => chatInputRef.current?.focus(), 120);
+  };
+
+  const handleImportAssets = async () => {
+    setErrorMessage(null);
+    setImportReport(null);
+    if (importFiles.length === 0) {
+      setErrorMessage("Carica almeno un file CSV o screenshot.");
+      return;
+    }
+    const sourcePlatform = importPlatform.trim() || "unknown";
+    setIsImportingAssets(true);
+    try {
+      let targetPortfolioId = importPortfolioId;
+      if (importDestinationType === "new") {
+        if (!importNewPortfolioName.trim()) {
+          setErrorMessage("Inserisci il nome del nuovo portafoglio.");
+          return;
+        }
+        const created = await handleCreatePortfolio(importNewPortfolioName.trim());
+        if (!created) return;
+        targetPortfolioId = created.id;
+      }
+      if (!targetPortfolioId) {
+        setErrorMessage("Seleziona un portafoglio di destinazione.");
+        return;
+      }
+
+      const csvFiles = importFiles.filter((file) => file.name.toLowerCase().endsWith(".csv"));
+      const screenshotFiles = importFiles.filter((file) => !file.name.toLowerCase().endsWith(".csv"));
+
+      const csvRows = (await Promise.all(csvFiles.map((file) => parseCsvRows(file)))).flat();
+      let screenshotRows: ImportCandidateRow[] = [];
+      if (screenshotFiles.length > 0) {
+        const formData = new FormData();
+        screenshotFiles.forEach((file) => formData.append("files", file));
+        const screenshotRes = await fetch("/api/import-screenshot", { method: "POST", body: formData });
+        const screenshotPayload = (await screenshotRes.json()) as { rows?: ImportCandidateRow[]; error?: string };
+        if (!screenshotRes.ok) throw new Error(screenshotPayload.error ?? "Errore elaborazione screenshot.");
+        screenshotRows = screenshotPayload.rows ?? [];
+      }
+
+      const allRows = [...csvRows, ...screenshotRows];
+      if (allRows.length === 0) {
+        setErrorMessage("Non ho trovato righe importabili nei file caricati.");
+        return;
+      }
+
+      const existingAssets = assets.filter((asset) => asset.portfolio_id === targetPortfolioId);
+      const existingKeys = new Set(
+        existingAssets.map((asset) =>
+          buildDedupeKey({
+            ticker: asset.ticker,
+            name: asset.name,
+            sourcePlatform: asset.source_platform ?? "unknown",
+            portfolioId: targetPortfolioId,
+          }),
+        ),
+      );
+      const batchKeys = new Set<string>();
+      const reviewRows: ImportCandidateRow[] = [];
+      const rowsToInsert: Array<{
+        portfolio_id: string;
+        ticker: string;
+        name: string;
+        asset_type: string;
+        quantity: number;
+        purchase_price: number;
+        purchase_date: string;
+        source_platform: string;
+        external_symbol: string | null;
+        import_batch_id: string;
+      }> = [];
+
+      let duplicates = 0;
+      const importBatchId = crypto.randomUUID();
+      for (const row of allRows) {
+        const dedupeKey = buildDedupeKey({
+          ticker: row.ticker,
+          name: row.name,
+          sourcePlatform,
+          portfolioId: targetPortfolioId,
+        });
+        if (existingKeys.has(dedupeKey) || batchKeys.has(dedupeKey)) {
+          duplicates += 1;
+          continue;
+        }
+        batchKeys.add(dedupeKey);
+
+        const hasRequiredFields = Boolean(row.name?.trim()) && Boolean(row.ticker) && row.quantity != null && row.purchase_price != null;
+        if (row.needs_review || !hasRequiredFields) {
+          reviewRows.push({
+            ...row,
+            needs_review: true,
+            reason: row.reason ?? "Dati non chiari: conferma manuale richiesta.",
+          });
+          continue;
+        }
+
+        rowsToInsert.push({
+          portfolio_id: targetPortfolioId,
+          ticker: normalizeIdentifier(row.ticker),
+          name: row.name.trim(),
+          asset_type: "imported",
+          quantity: Number(row.quantity!.toFixed(6)),
+          purchase_price: Number(row.purchase_price!.toFixed(6)),
+          purchase_date: row.purchase_date ?? new Date().toISOString().slice(0, 10),
+          source_platform: sourcePlatform,
+          external_symbol: row.ticker,
+          import_batch_id: importBatchId,
+        });
+      }
+
+      if (rowsToInsert.length > 0) {
+        const { error } = await supabase.from("assets").insert(rowsToInsert);
+        if (error) throw error;
+      }
+
+      const portfolioIdsForReload = importDestinationType === "new"
+        ? [...new Set([...portfolios.map((p) => p.id), targetPortfolioId])]
+        : portfolios.map((p) => p.id);
+      const updatedAssets = await loadAssets(portfolioIdsForReload);
+      await loadPrices(updatedAssets);
+      await loadNews();
+
+      setImportReport({
+        imported: rowsToInsert.length,
+        duplicates,
+        needsReview: reviewRows.length,
+        reviewRows,
+      });
+      setIsImportModalOpen(false);
+      resetImportForm();
+      if (reviewRows.length > 0) askMateForReviewRows(reviewRows);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Errore importazione.");
+    } finally {
+      setIsImportingAssets(false);
+    }
   };
 
   useEffect(() => {
@@ -718,6 +993,21 @@ export default function DashboardPage() {
     setIsChatMinimized(false);
   };
 
+  const openDiaryFromChat = () => {
+    const latestUserMessage = [...chatMessages].reverse().find((message) => message.role === "user")?.content?.trim() ?? "";
+    const draft = chatInput.trim() || latestUserMessage;
+    if (!draft) {
+      setChatErrorMessage("Scrivi prima un pensiero da salvare nel diario.");
+      return;
+    }
+    const params = new URLSearchParams({
+      source: "chat",
+      contextType: "chat_reflection",
+      draft: draft.slice(0, 1200),
+    });
+    router.push(`/checkin?${params.toString()}`);
+  };
+
   // ── PORTFOLIO GROUP CARD ──────────────────────────────────────
   const PortfolioGroupCard = ({ portfolio }: { portfolio: PortfolioRow }) => {
     const isCollapsed = collapsedPortfolios[portfolio.id] ?? false;
@@ -783,10 +1073,18 @@ export default function DashboardPage() {
                               {isPricesLoading ? "..." : gainLoss != null ? `${p ? "+" : ""}${formatCurrency(gainLoss)} (${p ? "+" : ""}${gainLossPercent!.toFixed(2)}%)` : "—"}
                             </td>
                             <td className="px-4 py-3">
-                              <button type="button" onClick={() => void handleDeleteAsset(asset.id)} disabled={deletingAssetId === asset.id}
-                                className="rounded px-2 py-1 text-xs text-red-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-40">
-                                {deletingAssetId === asset.id ? "..." : "Elimina"}
-                              </button>
+                              <div className="flex items-center gap-2">
+                                <Link
+                                  href={`/checkin?source=portfolio&contextType=purchase_reflection&ticker=${encodeURIComponent(asset.ticker)}&assetId=${encodeURIComponent(asset.id)}&portfolioId=${encodeURIComponent(asset.portfolio_id)}`}
+                                  className="rounded px-2 py-1 text-xs text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-950/40"
+                                >
+                                  Nota diario
+                                </Link>
+                                <button type="button" onClick={() => void handleDeleteAsset(asset.id)} disabled={deletingAssetId === asset.id}
+                                  className="rounded px-2 py-1 text-xs text-red-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-40">
+                                  {deletingAssetId === asset.id ? "..." : "Elimina"}
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         );
@@ -813,10 +1111,18 @@ export default function DashboardPage() {
                             {isPricesLoading ? "..." : gainLoss != null ? `${p ? "+" : ""}${gainLossPercent!.toFixed(1)}%` : "—"}
                           </p>
                         </div>
-                        <button type="button" onClick={() => void handleDeleteAsset(asset.id)} disabled={deletingAssetId === asset.id}
-                          className="ml-3 rounded px-2 py-1 text-xs text-red-400 hover:bg-red-50 disabled:opacity-40">
-                          {deletingAssetId === asset.id ? "..." : "✕"}
-                        </button>
+                        <div className="ml-3 flex items-center gap-1">
+                          <Link
+                            href={`/checkin?source=portfolio&contextType=purchase_reflection&ticker=${encodeURIComponent(asset.ticker)}&assetId=${encodeURIComponent(asset.id)}&portfolioId=${encodeURIComponent(asset.portfolio_id)}`}
+                            className="rounded px-2 py-1 text-[11px] text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-950/40"
+                          >
+                            Diario
+                          </Link>
+                          <button type="button" onClick={() => void handleDeleteAsset(asset.id)} disabled={deletingAssetId === asset.id}
+                            className="rounded px-2 py-1 text-xs text-red-400 hover:bg-red-50 disabled:opacity-40">
+                            {deletingAssetId === asset.id ? "..." : "✕"}
+                          </button>
+                        </div>
                       </div>
                     );
                   })}
@@ -860,6 +1166,14 @@ export default function DashboardPage() {
             className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500">
             <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
             Aggiungi
+          </button>
+          <button
+            type="button"
+            ref={importButtonRef}
+            onClick={openImportModal}
+            className={`inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 ${getTutorialTargetClass("import")}`}
+          >
+            Importa con Mate
           </button>
           <button
             ref={analysisButtonRef}
@@ -939,6 +1253,33 @@ export default function DashboardPage() {
       </div>
 
       {errorMessage && <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{errorMessage}</p>}
+      {importReport && (
+        <div className="mb-4 rounded-xl border border-blue-200 bg-blue-50 p-4 dark:border-blue-900/40 dark:bg-blue-950/20">
+          <h3 className="text-sm font-semibold text-blue-800 dark:text-blue-300">Report importazione guidata dal Mate</h3>
+          <p className="mt-1 text-sm text-blue-700 dark:text-blue-300">
+            Importati: {importReport.imported} · Duplicati ignorati: {importReport.duplicates} · Righe da rivedere: {importReport.needsReview}
+          </p>
+          {importReport.reviewRows.length > 0 && (
+            <div className="mt-3 space-y-2">
+              <p className="text-xs font-medium uppercase tracking-wider text-blue-700/80 dark:text-blue-300/80">Rivedi righe non chiare</p>
+              <div className="space-y-1">
+                {importReport.reviewRows.slice(0, 5).map((row, index) => (
+                  <div key={`${row.sourceFile}-${row.name}-${index}`} className="rounded-lg bg-white/80 px-3 py-2 text-xs text-zinc-700 dark:bg-zinc-900/70 dark:text-zinc-200">
+                    <span className="font-semibold">{row.name}</span> · {row.reason ?? "Dati incompleti"}
+                  </div>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={() => askMateForReviewRows(importReport.reviewRows)}
+                className="inline-flex items-center rounded-lg border border-blue-300 bg-white px-3 py-1.5 text-xs font-medium text-blue-700 transition hover:bg-blue-100 dark:border-blue-700 dark:bg-zinc-900 dark:text-blue-300"
+              >
+                Rivedi col Mate
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {isPageLoading ? (
         <div className="space-y-3">{[1, 2].map((i) => <div key={i} className="animate-pulse rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900"><div className="mb-3 h-4 w-1/4 rounded bg-zinc-200 dark:bg-zinc-700" /><div className="h-3 w-full rounded bg-zinc-100 dark:bg-zinc-800" /></div>)}</div>
@@ -1030,7 +1371,7 @@ export default function DashboardPage() {
                   onClick={() => openChatFromNews(item)}
                   className="inline-flex rounded-lg border border-blue-300 px-2.5 py-1 text-xs font-semibold text-blue-700 transition hover:bg-blue-50 dark:border-blue-700 dark:text-blue-300 dark:hover:bg-blue-900/20"
                 >
-                  Parlane col compagno
+                  Parlane col mate
                 </button>
               </div>
             </article>
@@ -1044,7 +1385,7 @@ export default function DashboardPage() {
   const InsightsSection = (
     <div ref={insightsRef} className={`rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 ${getTutorialTargetClass("insights")}`}>
       <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
-        <h2 className="font-semibold tracking-tight">Insight del compagno</h2>
+        <h2 className="font-semibold tracking-tight">Insight del mate</h2>
         <button type="button" onClick={() => void loadInsights(news)} disabled={isInsightsLoading}
           className="inline-flex items-center rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 transition hover:border-blue-300 hover:text-blue-600 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
           {isInsightsLoading ? "Aggiornamento..." : "Aggiorna"}
@@ -1099,7 +1440,7 @@ export default function DashboardPage() {
   const SignalsSection = (
     <div ref={signalsRef} className={`rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 ${getTutorialTargetClass("signals")}`}>
       <div className="border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
-        <h2 className="font-semibold tracking-tight">Segnali del compagno</h2>
+        <h2 className="font-semibold tracking-tight">Segnali del mate</h2>
         <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
           Alert narrativi e contestualizzati al tuo portafoglio, non semplici soglie tecniche.
         </p>
@@ -1107,7 +1448,7 @@ export default function DashboardPage() {
       <div className="space-y-2 p-3">
         {conversationalSignals.length === 0 ? (
           <p className="rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-300">
-            Nessun segnale urgente al momento. Il compagno continuerà a monitorare il contesto per te.
+            Nessun segnale urgente al momento. Il mate continuera a monitorare il contesto per te.
           </p>
         ) : (
           conversationalSignals.map((signal) => (
@@ -1154,7 +1495,7 @@ export default function DashboardPage() {
               className={`flex h-7 w-7 items-center justify-center rounded-lg border transition ${isHistoryOpen ? "border-blue-300 bg-blue-50 text-blue-600 dark:border-blue-700 dark:bg-blue-900/20" : "border-zinc-200 bg-white text-zinc-400 hover:border-zinc-300 hover:text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900"}`}>
               <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" /></svg>
             </button>
-            <h2 className="truncate text-sm font-semibold">Compagno</h2>
+            <h2 className="truncate text-sm font-semibold">Mate</h2>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
             {!isChatExpanded && (
@@ -1232,6 +1573,13 @@ export default function DashboardPage() {
             </div>
             <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
               {chatErrorMessage && <p className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{chatErrorMessage}</p>}
+              <button
+                type="button"
+                onClick={openDiaryFromChat}
+                className="mb-2 inline-flex rounded-full border border-zinc-300 bg-white px-3 py-1 text-xs font-medium text-zinc-600 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
+              >
+                Salva nel diario
+              </button>
               <form onSubmit={handleSendChatMessage} className="flex items-center gap-2">
                 <input ref={chatInputRef} type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)} placeholder="Scrivi un messaggio..."
                   className="w-full rounded-full border border-zinc-300 bg-white px-4 py-2 text-sm outline-none ring-blue-200 transition focus:border-blue-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950" />
@@ -1253,12 +1601,103 @@ export default function DashboardPage() {
       type="button"
       onClick={handleRestoreChat}
       className="fixed bottom-24 right-3 z-50 inline-flex items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-lg transition hover:bg-blue-500 sm:bottom-4 sm:right-4"
-      aria-label="Apri il compagno"
+      aria-label="Apri il mate"
     >
       <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 01.865-.501 48.172 48.172 0 003.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" /></svg>
-      Compagno
+      Mate
     </button>
   );
+
+  const ImportAssetsModal = isImportModalOpen ? (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-zinc-950/50 sm:items-center">
+      <div className="w-full max-w-xl rounded-t-2xl border border-zinc-200 bg-white p-6 shadow-xl sm:rounded-2xl dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="mb-4 flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold">Import guidato dal Mate</h2>
+            <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+              Carica CSV o screenshot. Deduplico in automatico i titoli uguali nella stessa piattaforma e portafoglio.
+            </p>
+          </div>
+          <button type="button" onClick={() => { setIsImportModalOpen(false); resetImportForm(); }} className="rounded-md p-1 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700">✕</button>
+        </div>
+
+        <div className="space-y-4">
+          <div>
+            <label className="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Piattaforma di origine</label>
+            <input
+              type="text"
+              value={importPlatform}
+              onChange={(e) => setImportPlatform(e.target.value)}
+              placeholder="Es. Fineco, eToro, Degiro"
+              className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-200 dark:border-zinc-700 dark:bg-zinc-950"
+            />
+            <p className="mt-1 text-xs text-zinc-500">Serve per evitare duplicati sbagliati tra piattaforme diverse.</p>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">File (CSV o screenshot)</label>
+            <input
+              type="file"
+              accept=".csv,image/*"
+              multiple
+              onChange={(e) => setImportFiles(Array.from(e.target.files ?? []))}
+              className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none file:mr-3 file:rounded-md file:border-0 file:bg-blue-600 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-white hover:file:bg-blue-500 dark:border-zinc-700 dark:bg-zinc-950"
+            />
+            <p className="mt-1 text-xs text-zinc-500">{importFiles.length > 0 ? `${importFiles.length} file selezionati` : "Nessun file selezionato"}</p>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Dove vuoi importare?</label>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => setImportDestinationType("existing")}
+                className={`rounded-lg border px-3 py-2 text-sm font-medium transition ${importDestinationType === "existing" ? "border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300" : "border-zinc-300 text-zinc-600 dark:border-zinc-700 dark:text-zinc-300"}`}
+              >
+                Aggiungi a esistente
+              </button>
+              <button
+                type="button"
+                onClick={() => setImportDestinationType("new")}
+                className={`rounded-lg border px-3 py-2 text-sm font-medium transition ${importDestinationType === "new" ? "border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300" : "border-zinc-300 text-zinc-600 dark:border-zinc-700 dark:text-zinc-300"}`}
+              >
+                Crea nuovo portafoglio
+              </button>
+            </div>
+          </div>
+
+          {importDestinationType === "existing" ? (
+            <select
+              value={importPortfolioId}
+              onChange={(e) => setImportPortfolioId(e.target.value)}
+              className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-200 dark:border-zinc-700 dark:bg-zinc-950"
+            >
+              {portfolios.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          ) : (
+            <input
+              type="text"
+              value={importNewPortfolioName}
+              onChange={(e) => setImportNewPortfolioName(e.target.value)}
+              placeholder="Es. Portafoglio da screenshot"
+              className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-200 dark:border-zinc-700 dark:bg-zinc-950"
+            />
+          )}
+
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-300">
+            Se un dato non e chiaro dagli screenshot, il Mate te lo chiede: non viene inventato nulla.
+          </div>
+
+          <div className="flex items-center justify-end gap-3 pt-2">
+            <button type="button" onClick={() => { setIsImportModalOpen(false); resetImportForm(); }} className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800">Annulla</button>
+            <button type="button" onClick={() => void handleImportAssets()} disabled={isImportingAssets} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-70">
+              {isImportingAssets ? "Import in corso..." : "Importa"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  ) : null;
 
   // ── ADD ASSET MODAL ───────────────────────────────────────────
   const AddAssetModal = isAddAssetModalOpen ? (
@@ -1339,7 +1778,7 @@ export default function DashboardPage() {
 
           {/* Logo — fisso a sinistra */}
           <p className="w-40 flex-shrink-0 text-base font-semibold tracking-tight text-blue-700 dark:text-blue-400">
-            Folio Companion
+            Folio Mate
           </p>
 
           {/* Nav centrale — solo desktop */}
@@ -1360,8 +1799,12 @@ export default function DashboardPage() {
 
           {/* Azioni destra */}
           <div className="flex w-40 flex-shrink-0 items-center justify-end gap-2">
-            <a href="/checkin" className="hidden rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 sm:inline-flex">
-              Check-in
+            <a
+              ref={diaryButtonRef}
+              href="/checkin"
+              className={`hidden rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 sm:inline-flex ${getTutorialTargetClass("diary")}`}
+            >
+              Diario
             </a>
             <button
               type="button"
@@ -1400,7 +1843,7 @@ export default function DashboardPage() {
           {mobileTab === "news" && NewsSection}
           {mobileTab === "chat" && (
             <div className="rounded-xl border border-zinc-200 bg-white p-4 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
-              Il Compagno e sempre visibile in sovraimpressione.
+              Il Mate e sempre visibile in sovraimpressione.
             </div>
           )}
         </div>
@@ -1412,7 +1855,7 @@ export default function DashboardPage() {
                 news: <path strokeLinecap="round" strokeLinejoin="round" d="M12 7.5h1.5m-1.5 3h1.5m-7.5 3h7.5m-7.5 3h7.5m3-9h3.375c.621 0 1.125.504 1.125 1.125V18a2.25 2.25 0 01-2.25 2.25M16.5 7.5V18a2.25 2.25 0 002.25 2.25M16.5 7.5V4.875c0-.621-.504-1.125-1.125-1.125H4.125C3.504 3.75 3 4.254 3 4.875V18a2.25 2.25 0 002.25 2.25h13.5M6 7.5h3v3H6v-3z" />,
                 chat: <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 01.865-.501 48.172 48.172 0 003.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" />,
               };
-              const labels: Record<MobileTab, string> = { portfolio: "Portafoglio", news: "Notizie", chat: "Compagno" };
+              const labels: Record<MobileTab, string> = { portfolio: "Portafoglio", news: "Notizie", chat: "Mate" };
               return (
                 <button key={tab} type="button" onClick={() => setMobileTab(tab)}
                   className={`flex flex-1 flex-col items-center gap-1 py-3 text-xs font-medium transition ${mobileTab === tab ? "text-blue-600 dark:text-blue-400" : "text-zinc-500 dark:text-zinc-400"}`}>
@@ -1495,6 +1938,7 @@ export default function DashboardPage() {
         </>
       )}
 
+      {ImportAssetsModal}
       {AddAssetModal}
     </main>
   );

@@ -17,16 +17,32 @@ type SessionSummaryRow = {
   created_at: string;
 };
 
-const CHAT_SYSTEM_PROMPT_TEMPLATE = `Sei Folio, un compagno finanziario personale caldo, colloquiale e proattivo. Parli come una persona reale: diretto, umano, rassicurante quando serve, senza tono da consulente formale.
+type DiaryNoteRow = {
+  notes: string | null;
+  mood: number | null;
+  created_at: string;
+  context_type: string | null;
+  asset_id: string | null;
+};
+
+type DiaryAssetRow = {
+  id: string;
+  ticker: string;
+};
+
+const CHAT_SYSTEM_PROMPT_TEMPLATE = `Sei Folio, un mate finanziario personale caldo, colloquiale e proattivo. Parli come una persona reale: diretto, umano, rassicurante quando serve, senza tono da consulente formale.
 
 Il portafoglio dell'utente è composto da: [PORTFOLIO].
 
 [MEMORY]
 
+[DIARY]
+
 Linee guida:
 - Inizia con una micro-validazione emotiva (1 frase breve), soprattutto se l'utente mostra ansia, dubbio o frustrazione.
 - Usa sempre il portafoglio specifico dell'utente per personalizzare la risposta (es. "nel tuo caso con AAPL..." o "dato che hai ETF come...").
 - Se la memoria è rilevante, usala per continuità in modo naturale ("riprendendo quello che avevamo visto...").
+- Se nel diario ci sono note recenti, usale con sensibilità per entrare in empatia e contestualizzare il tono (senza fare lo psicologo).
 - Evita domande di rimbalzo generiche come "cosa vuoi approfondire?" o "a cosa pensavi?".
 - Invece di fare domande aperte, sii proattivo: proponi 2-3 letture/alternative/scenari concreti e pratici, con pro/contro e rischi principali.
 - NON dare mai consigli diretti di acquisto o vendita. NON usare mai le parole "compra" o "vendi".
@@ -178,9 +194,44 @@ export async function POST(request: Request) {
       }
     }
 
+    let diaryContext = "";
+    const { data: diaryRows } = await supabase
+      .from("checkins")
+      .select("notes, mood, created_at, context_type, asset_id")
+      .eq("user_id", user.id)
+      .not("notes", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(8);
+
+    const typedDiaryRows = ((diaryRows ?? []) as DiaryNoteRow[]).filter((row) => row.notes?.trim());
+    if (typedDiaryRows.length > 0) {
+      const assetIds = Array.from(new Set(typedDiaryRows.map((row) => row.asset_id).filter(Boolean))) as string[];
+      const assetTickerById = new Map<string, string>();
+      if (assetIds.length > 0) {
+        const { data: diaryAssets } = await supabase
+          .from("assets")
+          .select("id, ticker")
+          .in("id", assetIds);
+        ((diaryAssets ?? []) as DiaryAssetRow[]).forEach((asset) => {
+          if (asset.id && asset.ticker) assetTickerById.set(asset.id, asset.ticker);
+        });
+      }
+
+      const diaryItems = typedDiaryRows.map((row) => {
+        const date = new Date(row.created_at).toLocaleDateString("it-IT");
+        const mood = row.mood ? `mood ${row.mood}/5` : "mood n/d";
+        const ticker = row.asset_id ? assetTickerById.get(row.asset_id) : null;
+        const context = row.context_type ?? "free_note";
+        const prefix = ticker ? `${ticker} · ${context}` : context;
+        return `- ${date} (${prefix}, ${mood}): ${row.notes?.trim()}`;
+      }).join("\n");
+      diaryContext = `\nEstratti dal diario personale:\n${diaryItems}\n`;
+    }
+
     const systemPrompt = CHAT_SYSTEM_PROMPT_TEMPLATE
       .replace("[PORTFOLIO]", portfolioContext)
-      .replace("[MEMORY]", memoryContext);
+      .replace("[MEMORY]", memoryContext)
+      .replace("[DIARY]", diaryContext);
 
     const messagesForClaude = [
       ...history.map((msg) => ({ role: msg.role, content: msg.content.trim() })),
