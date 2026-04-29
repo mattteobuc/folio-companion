@@ -42,7 +42,6 @@ export async function GET() {
     const portfolioIds = (portfolios ?? []).map((portfolio) => portfolio.id);
     const today = new Date();
     const todayLabel = today.toLocaleDateString("it-IT");
-
     let tickerList = "Nessun asset presente";
 
     if (portfolioIds.length > 0) {
@@ -69,11 +68,16 @@ export async function GET() {
     }
 
     const prompt =
-      "Sei un assistente finanziario. " +
-      `Oggi e ${todayLabel}. ` +
-      `Ho un portafoglio composto da questi asset: ${tickerList}. ` +
-      "Ci sono eventi macro rilevanti recenti (decisioni FED, dati inflazione, earnings, geopolitica) che potrebbero influenzare questi asset? " +
-      "Spiegalo in 3-4 frasi semplici in italiano, senza mai dare consigli di acquisto o vendita.";
+      `Oggi è ${todayLabel}. Il portafoglio contiene: ${tickerList}.\n\n` +
+      "Analizza il contesto macro attuale e restituisci un report strutturato in questo formato esatto:\n\n" +
+      "Per ogni topic rilevante (max 3 topic tra: Banche Centrali, Inflazione, Geopolitica, Earnings, Mercati, Crypto, Energia) scrivi:\n\n" +
+      "TOPIC: [nome topic]\n" +
+      "SENTIMENT: [Positivo / Negativo / Neutro / Misto]\n" +
+      "ANALISI: [1-2 frasi secche e informative su cosa sta succedendo e perché è rilevante per il portafoglio]\n\n" +
+      "Includi solo i topic effettivamente rilevanti per gli asset in portafoglio.\n" +
+      "Non dare mai consigli di acquisto o vendita.\n" +
+      "Scrivi in italiano, tono diretto e professionale.\n" +
+      "Non aggiungere introduzioni, conclusioni o note finali.";
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -84,7 +88,7 @@ export async function GET() {
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-6",
-        max_tokens: 260,
+        max_tokens: 500,
         messages: [{ role: "user", content: prompt }],
       }),
     });
@@ -100,7 +104,6 @@ export async function GET() {
     const data = (await response.json()) as {
       content?: Array<{ type: string; text?: string }>;
     };
-
     const text =
       data.content?.find((block) => block.type === "text" && block.text)?.text?.trim() ?? "";
 
@@ -111,8 +114,27 @@ export async function GET() {
       );
     }
 
+    // Parsa il testo strutturato in blocchi topic
+    const topics: Array<{ topic: string; sentiment: string; analisi: string }> = [];
+    const blocks = text.split(/\n(?=TOPIC:)/);
+
+    for (const block of blocks) {
+      const topicMatch = block.match(/TOPIC:\s*(.+)/);
+      const sentimentMatch = block.match(/SENTIMENT:\s*(.+)/);
+      const analisiMatch = block.match(/ANALISI:\s*([\s\S]+?)(?:\n\n|$)/);
+
+      if (topicMatch && sentimentMatch && analisiMatch) {
+        topics.push({
+          topic: topicMatch[1].trim(),
+          sentiment: sentimentMatch[1].trim(),
+          analisi: analisiMatch[1].trim(),
+        });
+      }
+    }
+
     return NextResponse.json({
       testo: text,
+      topics: topics.length > 0 ? topics : null,
       data: todayLabel,
       tickers: tickerList,
     });
