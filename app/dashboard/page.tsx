@@ -18,6 +18,65 @@ type SymbolSearchResult = { ticker: string; name: string; market: string; asset_
 type PricesMap = Record<string, number | null>;
 type MobileTab = "portfolio" | "news" | "chat";
 type ChatSession = { id: string; title: string | null; updated_at: string };
+type TutorialStep = {
+  id: string;
+  title: string;
+  description: string;
+  target: "portfolio" | "insights" | "signals" | "macro" | "news" | "chat" | "analysis";
+};
+
+const TUTORIAL_STEPS: TutorialStep[] = [
+  {
+    id: "portfolio",
+    title: "Il tuo portafoglio",
+    description: "Qui trovi asset, performance e organizzazione per portafoglio. Da qui puoi aggiungere o modificare rapidamente le posizioni.",
+    target: "portfolio",
+  },
+  {
+    id: "signals",
+    title: "Segnali del compagno",
+    description: "Questi sono alert conversazionali, contestualizzati al tuo portafoglio. Non sono segnali di trading, ma spunti di consapevolezza.",
+    target: "signals",
+  },
+  {
+    id: "insights",
+    title: "Insight sintetici",
+    description: "Una vista rapida dei punti importanti del momento. Puoi espandere ogni card quando vuoi più dettaglio.",
+    target: "insights",
+  },
+  {
+    id: "macro",
+    title: "Contesto di mercato",
+    description: "Qui vedi una sintesi macro in linguaggio semplice per capire il contesto prima di reagire emotivamente.",
+    target: "macro",
+  },
+  {
+    id: "news",
+    title: "Notizie per te",
+    description: "Notizie rilevanti per i tuoi ticker, con riassunti leggibili e pulsante per parlarne subito con il compagno.",
+    target: "news",
+  },
+  {
+    id: "chat",
+    title: "Compagno conversazionale",
+    description: "La chat è il cuore dell’app: puoi aprire discussioni contestuali e ricevere spiegazioni proattive senza consigli buy/sell.",
+    target: "chat",
+  },
+  {
+    id: "analysis",
+    title: "Analisi dedicata",
+    description: "Con il pulsante Analisi apri una pagina separata con approfondimenti su performance e moduli futuri.",
+    target: "analysis",
+  },
+];
+type ConversationalSignal = {
+  id: string;
+  livello: "attenzione" | "monitoraggio" | "info";
+  titolo: string;
+  motivo: string;
+  prompt: string;
+  sourceUrl?: string;
+};
 type Insight = {
   ticker?: string; titolo?: string; contenuto?: string;
   tipo?: "attenzione" | "opportunità" | "info";
@@ -27,6 +86,7 @@ type Insight = {
 const MACRO_CACHE_KEY = "folio:macro-context:v2";
 const MACRO_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const NEWS_SUMMARY_CACHE_KEY = "folio:news-summaries:v1";
+const TUTORIAL_COMPLETED_LOCAL_KEY = "folio:tutorial-completed:v1";
 const INITIAL_CHAT_MESSAGE = "Ciao! Sono il tuo compagno finanziario. Puoi chiedermi tutto sul tuo portafoglio, sulle notizie di mercato o sugli eventi macro. Non ti darò mai consigli diretti di acquisto o vendita, ma ti aiuterò a capire meglio il contesto.";
 
 function SentimentBadge({ sentiment }: { sentiment: string }) {
@@ -100,6 +160,12 @@ export default function DashboardPage() {
   const [isLoadingSession, setIsLoadingSession] = useState(false);
   const [isChatExpanded, setIsChatExpanded] = useState(false);
   const [isChatMinimized, setIsChatMinimized] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+
+  const [isTutorialOpen, setIsTutorialOpen] = useState(false);
+  const [tutorialStepIndex, setTutorialStepIndex] = useState(0);
+  const [isTutorialSaving, setIsTutorialSaving] = useState(false);
+  const [hasTutorialAutostartChecked, setHasTutorialAutostartChecked] = useState(false);
 
   const [isAddAssetModalOpen, setIsAddAssetModalOpen] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -122,14 +188,26 @@ export default function DashboardPage() {
   const supabase = useMemo(() => createClient(), []);
   const symbolSearchContainerRef = useRef<HTMLDivElement | null>(null);
   const chatBottomRef = useRef<HTMLDivElement | null>(null);
+  const chatInputRef = useRef<HTMLInputElement | null>(null);
   const portfolioMenuRef = useRef<HTMLDivElement | null>(null);
   const portfolioRef = useRef<HTMLDivElement | null>(null);
+  const insightsRef = useRef<HTMLDivElement | null>(null);
+  const signalsRef = useRef<HTMLDivElement | null>(null);
   const macroRef = useRef<HTMLDivElement | null>(null);
   const newsRef = useRef<HTMLDivElement | null>(null);
+  const chatRef = useRef<HTMLDivElement | null>(null);
+  const analysisButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const scrollTo = (ref: React.RefObject<HTMLDivElement | null>) => {
     ref.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
+
+  const tutorialSteps = TUTORIAL_STEPS;
+  const currentTutorialTarget = isTutorialOpen ? tutorialSteps[tutorialStepIndex]?.target : null;
+  const getTutorialTargetClass = (target: TutorialStep["target"]) =>
+    isTutorialOpen && currentTutorialTarget === target
+      ? "relative z-[65] rounded-xl ring-2 ring-blue-400 ring-offset-2 ring-offset-zinc-50 dark:ring-offset-zinc-950"
+      : "";
 
   const visiblePortfolios = useMemo(() =>
     activePortfolioFilter === "all" ? portfolios : portfolios.filter((p) => p.id === activePortfolioFilter),
@@ -267,21 +345,182 @@ export default function DashboardPage() {
     setChatSessions((data ?? []) as ChatSession[]);
   }, [supabase]);
 
+  const getTutorialCompleted = useCallback(async (userId: string): Promise<boolean> => {
+    const getLocalTutorialStatus = () => {
+      if (typeof window === "undefined") return false;
+      return window.localStorage.getItem(TUTORIAL_COMPLETED_LOCAL_KEY) === "true";
+    };
+    const { data, error } = await supabase
+      .from("user_onboarding_status")
+      .select("dashboard_tutorial_completed")
+      .eq("user_id", userId)
+      .maybeSingle<{ dashboard_tutorial_completed: boolean }>();
+    if (error) {
+      // Fallback non bloccante: se la tabella non esiste o non è accessibile usiamo stato locale.
+      console.warn("Errore lettura onboarding tutorial (fallback locale attivo):", {
+        message: error.message,
+        code: error.code,
+        details: error.details,
+      });
+      return getLocalTutorialStatus();
+    }
+    return data?.dashboard_tutorial_completed ?? getLocalTutorialStatus();
+  }, [supabase]);
+
+  const markTutorialCompleted = useCallback(async () => {
+    if (!currentUserId) return;
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(TUTORIAL_COMPLETED_LOCAL_KEY, "true");
+    }
+    setIsTutorialSaving(true);
+    try {
+      const { error } = await supabase.from("user_onboarding_status").upsert(
+        { user_id: currentUserId, dashboard_tutorial_completed: true, updated_at: new Date().toISOString() },
+        { onConflict: "user_id" },
+      );
+      if (error) throw error;
+    } catch (error) {
+      console.warn("Errore salvataggio onboarding tutorial (persistito localmente):", error);
+    } finally {
+      setIsTutorialSaving(false);
+    }
+  }, [currentUserId, supabase]);
+
+  const openChatFromNews = (item: NewsItem) => {
+    const prefilledMessage = `Ho letto questa notizia su ${item.ticker}: "${item.titolo}". Mi aiuti a capire in modo semplice i possibili scenari per il mio portafoglio e cosa osservare nei prossimi giorni?`;
+    setIsChatMinimized(false);
+    setIsChatExpanded(true);
+    setMobileTab("chat");
+    setChatInput(prefilledMessage);
+    window.requestAnimationFrame(() => {
+      chatInputRef.current?.focus();
+      chatInputRef.current?.setSelectionRange(prefilledMessage.length, prefilledMessage.length);
+    });
+  };
+
+  const openChatFromPrompt = (prompt: string) => {
+    setIsChatMinimized(false);
+    setIsChatExpanded(true);
+    setMobileTab("chat");
+    setChatInput(prompt);
+    window.requestAnimationFrame(() => {
+      chatInputRef.current?.focus();
+      chatInputRef.current?.setSelectionRange(prompt.length, prompt.length);
+    });
+  };
+
+  const openTutorial = () => {
+    setIsChatMinimized(false);
+    setIsTutorialOpen(true);
+    setTutorialStepIndex(0);
+  };
+
+  const goToTutorialStep = (nextIndex: number) => {
+    const boundedIndex = Math.max(0, Math.min(nextIndex, tutorialSteps.length - 1));
+    const step = tutorialSteps[boundedIndex];
+    if (step?.target === "chat") {
+      setIsChatMinimized(false);
+      setIsChatExpanded(true);
+      setMobileTab("chat");
+    }
+    setTutorialStepIndex(boundedIndex);
+  };
+
+  const closeTutorial = async (markAsCompleted: boolean) => {
+    setIsTutorialOpen(false);
+    setTutorialStepIndex(0);
+    if (markAsCompleted) {
+      await markTutorialCompleted();
+    }
+  };
+
+  const conversationalSignals = useMemo<ConversationalSignal[]>(() => {
+    const signals: ConversationalSignal[] = [];
+
+    // Segnale 1: movimento marcato rispetto al prezzo medio di carico.
+    for (const asset of allVisibleAssets) {
+      const metrics = getAssetMetrics(asset);
+      if (metrics.gainLossPercent == null) continue;
+      const absMove = Math.abs(metrics.gainLossPercent);
+      if (absMove < 12) continue;
+      const direction = metrics.gainLossPercent >= 0 ? "salita" : "discesa";
+      signals.push({
+        id: `price-${asset.id}`,
+        livello: absMove >= 20 ? "attenzione" : "monitoraggio",
+        titolo: `${asset.ticker}: movimento in ${direction}`,
+        motivo: `${asset.ticker} si è mosso del ${metrics.gainLossPercent.toFixed(1)}% rispetto al tuo prezzo medio di carico. Potrebbe cambiare il peso emotivo e di rischio della posizione.`,
+        prompt: `Ho visto il movimento di ${asset.ticker} (${metrics.gainLossPercent.toFixed(1)}% vs mio prezzo medio). Mi aiuti a leggere il contesto in modo semplice e a capire cosa monitorare nei prossimi giorni?`,
+      });
+      if (signals.length >= 2) break;
+    }
+
+    // Segnale 2: notizia rilevante su ticker in portafoglio.
+    const portfolioTickers = new Set(allVisibleAssets.map((asset) => asset.ticker));
+    const newsSignal = news.find((item) => portfolioTickers.has(item.ticker));
+    if (newsSignal) {
+      signals.push({
+        id: `news-${newsSignal.ticker}-${newsSignal.url}`,
+        livello: "monitoraggio",
+        titolo: `${newsSignal.ticker}: notizia da monitorare`,
+        motivo: `È uscita una notizia potenzialmente rilevante per ${newsSignal.ticker}. Vale la pena contestualizzarla rispetto al tuo portafoglio.`,
+        prompt: `Questa notizia su ${newsSignal.ticker} ("${newsSignal.titolo}") quanto è davvero importante nel mio caso? Puoi spiegarmi gli scenari in linguaggio semplice?`,
+        sourceUrl: newsSignal.url,
+      });
+    }
+
+    // Segnale 3: concentrazione su singolo ticker.
+    if (allVisibleAssets.length > 0) {
+      const valueByTicker = new Map<string, number>();
+      let totalValue = 0;
+      allVisibleAssets.forEach((asset) => {
+        const currentPrice = prices[asset.ticker];
+        const value = (currentPrice ?? asset.purchase_price) * asset.quantity;
+        valueByTicker.set(asset.ticker, (valueByTicker.get(asset.ticker) ?? 0) + value);
+        totalValue += value;
+      });
+      if (totalValue > 0) {
+        const [topTicker, topValue] = Array.from(valueByTicker.entries()).sort((a, b) => b[1] - a[1])[0];
+        const concentration = (topValue / totalValue) * 100;
+        if (concentration >= 45) {
+          signals.push({
+            id: `concentration-${topTicker}`,
+            livello: concentration >= 60 ? "attenzione" : "monitoraggio",
+            titolo: `Concentrazione elevata su ${topTicker}`,
+            motivo: `${topTicker} rappresenta circa il ${concentration.toFixed(1)}% del valore totale. Una concentrazione alta può amplificare la volatilità percepita.`,
+            prompt: `Vedo che ${topTicker} pesa circa il ${concentration.toFixed(1)}% nel mio portafoglio. Mi aiuti a capire pro/contro di questa concentrazione e cosa osservare senza cambiare approccio in modo impulsivo?`,
+          });
+        }
+      }
+    }
+
+    return signals.slice(0, 3);
+  }, [allVisibleAssets, getAssetMetrics, news, prices]);
+
   const loadDashboardData = useCallback(async () => {
     setErrorMessage(null); setIsPageLoading(true);
     try {
       const { data: { user }, error: userError } = await supabase.auth.getUser();
       if (userError) throw userError;
       if (!user) { router.push("/login"); router.refresh(); return; }
+      setCurrentUserId(user.id);
       setUserEmail(user.email ?? "");
       const loadedPortfolios = await ensureDefaultPortfolio(user.id);
       const portfolioIds = loadedPortfolios.map((p) => p.id);
       const loadedAssets = await loadAssets(portfolioIds);
       const [loadedNews] = await Promise.all([loadNews(), loadPrices(loadedAssets), loadMacroContext(), loadChatSessions()]);
       if (loadedNews && loadedNews.length > 0) void loadInsights(loadedNews);
+
+      if (!hasTutorialAutostartChecked) {
+        const tutorialCompleted = await getTutorialCompleted(user.id);
+        if (!tutorialCompleted) {
+          setIsTutorialOpen(true);
+          setTutorialStepIndex(0);
+        }
+        setHasTutorialAutostartChecked(true);
+      }
     } catch (e) { setErrorMessage(e instanceof Error ? e.message : "Errore inatteso."); }
     finally { setIsPageLoading(false); }
-  }, [ensureDefaultPortfolio, loadAssets, loadPrices, loadMacroContext, loadNews, loadChatSessions, loadInsights, router, supabase]);
+  }, [ensureDefaultPortfolio, loadAssets, loadPrices, loadMacroContext, loadNews, loadChatSessions, loadInsights, hasTutorialAutostartChecked, getTutorialCompleted, router, supabase]);
 
   useEffect(() => {
     const id = window.requestAnimationFrame(() => { void loadDashboardData(); });
@@ -305,6 +544,30 @@ export default function DashboardPage() {
       document.body.style.overflow = previousOverflow;
     };
   }, [isChatExpanded]);
+
+  useEffect(() => {
+    if (!isTutorialOpen) return;
+    const step = tutorialSteps[tutorialStepIndex];
+    if (!step) return;
+    if (step.target === "chat") {
+      window.requestAnimationFrame(() => {
+        chatRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      });
+      return;
+    }
+    if (step.target === "analysis") {
+      analysisButtonRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    const refMap: Record<Exclude<TutorialStep["target"], "chat" | "analysis">, React.RefObject<HTMLDivElement | null>> = {
+      portfolio: portfolioRef,
+      insights: insightsRef,
+      signals: signalsRef,
+      macro: macroRef,
+      news: newsRef,
+    };
+    refMap[step.target]?.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [isTutorialOpen, tutorialStepIndex, tutorialSteps, portfolioRef, insightsRef, signalsRef, macroRef, newsRef]);
 
   const handleCreatePortfolio = async (name: string): Promise<PortfolioRow | null> => {
     const { data: { user } } = await supabase.auth.getUser();
@@ -578,7 +841,7 @@ export default function DashboardPage() {
 
   // ── SECTIONS ──────────────────────────────────────────────────
   const PortfolioSection = (
-    <div ref={portfolioRef} className="scroll-mt-20">
+    <div ref={portfolioRef} className={`scroll-mt-20 ${getTutorialTargetClass("portfolio")}`}>
       <div className="mb-3 flex items-center justify-between">
         <h1 className="text-xl font-semibold tracking-tight">Il mio portafoglio</h1>
         <div className="flex items-center gap-2">
@@ -597,6 +860,14 @@ export default function DashboardPage() {
             className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500">
             <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
             Aggiungi
+          </button>
+          <button
+            ref={analysisButtonRef}
+            type="button"
+            onClick={() => router.push("/dashboard/analisi")}
+            className={`inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 ${getTutorialTargetClass("analysis")}`}
+          >
+            Apri analisi
           </button>
         </div>
       </div>
@@ -694,7 +965,7 @@ export default function DashboardPage() {
   );
 
   const MacroSection = (
-    <div ref={macroRef} className="scroll-mt-20 rounded-xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+    <div ref={macroRef} className={`scroll-mt-20 rounded-xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900 ${getTutorialTargetClass("macro")}`}>
       <div className="mb-4 flex items-center justify-between gap-3">
         <h2 className="text-lg font-semibold tracking-tight">Contesto di mercato</h2>
         <button type="button" onClick={() => void loadMacroContext({ forceRefresh: true })} disabled={isMacroLoading}
@@ -729,7 +1000,7 @@ export default function DashboardPage() {
   );
 
   const NewsSection = (
-    <div ref={newsRef} className="scroll-mt-20">
+    <div ref={newsRef} className={`scroll-mt-20 ${getTutorialTargetClass("news")}`}>
       <div className="mb-4 flex items-center justify-between gap-3">
         <h2 className="text-xl font-semibold tracking-tight">Notizie per te</h2>
         <button type="button" onClick={() => void loadNews()} disabled={isNewsLoading}
@@ -752,7 +1023,16 @@ export default function DashboardPage() {
               <div className="mt-4 flex items-center justify-between text-xs text-zinc-500">
                 <span>{item.fonte}</span><span>{new Date(item.data).toLocaleDateString("it-IT")}</span>
               </div>
-              <a href={item.url} target="_blank" rel="noopener noreferrer" className="mt-4 inline-flex text-sm font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400">Leggi articolo</a>
+              <div className="mt-4 flex items-center gap-3">
+                <a href={item.url} target="_blank" rel="noopener noreferrer" className="inline-flex text-sm font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400">Leggi articolo</a>
+                <button
+                  type="button"
+                  onClick={() => openChatFromNews(item)}
+                  className="inline-flex rounded-lg border border-blue-300 px-2.5 py-1 text-xs font-semibold text-blue-700 transition hover:bg-blue-50 dark:border-blue-700 dark:text-blue-300 dark:hover:bg-blue-900/20"
+                >
+                  Parlane col compagno
+                </button>
+              </div>
             </article>
           ))}
         </div>
@@ -762,7 +1042,7 @@ export default function DashboardPage() {
   );
 
   const InsightsSection = (
-    <div className="rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+    <div ref={insightsRef} className={`rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 ${getTutorialTargetClass("insights")}`}>
       <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
         <h2 className="font-semibold tracking-tight">Insight del compagno</h2>
         <button type="button" onClick={() => void loadInsights(news)} disabled={isInsightsLoading}
@@ -816,12 +1096,57 @@ export default function DashboardPage() {
     </div>
   );
 
+  const SignalsSection = (
+    <div ref={signalsRef} className={`rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 ${getTutorialTargetClass("signals")}`}>
+      <div className="border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
+        <h2 className="font-semibold tracking-tight">Segnali del compagno</h2>
+        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+          Alert narrativi e contestualizzati al tuo portafoglio, non semplici soglie tecniche.
+        </p>
+      </div>
+      <div className="space-y-2 p-3">
+        {conversationalSignals.length === 0 ? (
+          <p className="rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-300">
+            Nessun segnale urgente al momento. Il compagno continuerà a monitorare il contesto per te.
+          </p>
+        ) : (
+          conversationalSignals.map((signal) => (
+            <article key={signal.id} className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-700 dark:bg-zinc-800/50">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">{signal.titolo}</h3>
+                <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${signal.livello === "attenzione" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300" : signal.livello === "monitoraggio" ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300" : "bg-zinc-200 text-zinc-600 dark:bg-zinc-700 dark:text-zinc-300"}`}>
+                  {signal.livello}
+                </span>
+              </div>
+              <p className="mt-1 text-sm leading-6 text-zinc-600 dark:text-zinc-300">{signal.motivo}</p>
+              <div className="mt-2 flex items-center gap-3 text-xs text-zinc-500">
+                <span>{new Date().toLocaleDateString("it-IT")}</span>
+                {signal.sourceUrl && (
+                  <a href={signal.sourceUrl} target="_blank" rel="noopener noreferrer" className="font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400">
+                    Fonte
+                  </a>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => openChatFromPrompt(signal.prompt)}
+                className="mt-3 inline-flex rounded-lg border border-blue-300 px-2.5 py-1 text-xs font-semibold text-blue-700 transition hover:bg-blue-50 dark:border-blue-700 dark:text-blue-300 dark:hover:bg-blue-900/20"
+              >
+                Parliamone
+              </button>
+            </article>
+          ))
+        )}
+      </div>
+    </div>
+  );
+
   // ── COMPANION PANEL ───────────────────────────────────────────
   const CompanionPanel = (
-    <div className="flex flex-col gap-4">
+    <div ref={chatRef} className={`flex flex-col gap-4 ${currentTutorialTarget === "chat" ? "rounded-xl ring-2 ring-blue-400 ring-offset-2 ring-offset-zinc-50 dark:ring-offset-zinc-950" : ""}`}>
 
       <div
-        className={`fixed z-50 flex flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg dark:border-zinc-800 dark:bg-zinc-900 ${isChatExpanded ? "inset-4 shadow-2xl" : "bottom-20 left-2 right-2 h-[58vh] max-h-[620px] sm:bottom-4 sm:left-auto sm:right-4 sm:h-[560px] sm:w-[420px]"}`}
+        className={`fixed ${isTutorialOpen && currentTutorialTarget === "chat" ? "z-[65]" : "z-50"} flex flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg dark:border-zinc-800 dark:bg-zinc-900 ${isChatExpanded ? "inset-4 shadow-2xl" : "bottom-20 left-2 right-2 h-[58vh] max-h-[620px] sm:bottom-4 sm:left-auto sm:right-4 sm:h-[560px] sm:w-[420px]"}`}
       >
         <div className="flex items-center justify-between gap-2 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
           <div className="flex min-w-0 items-center gap-2">
@@ -908,7 +1233,7 @@ export default function DashboardPage() {
             <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
               {chatErrorMessage && <p className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{chatErrorMessage}</p>}
               <form onSubmit={handleSendChatMessage} className="flex items-center gap-2">
-                <input type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)} placeholder="Scrivi un messaggio..."
+                <input ref={chatInputRef} type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)} placeholder="Scrivi un messaggio..."
                   className="w-full rounded-full border border-zinc-300 bg-white px-4 py-2 text-sm outline-none ring-blue-200 transition focus:border-blue-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950" />
                 <button type="submit" disabled={isSendingChat || !chatInput.trim()}
                   className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-blue-600 text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-70">
@@ -1038,6 +1363,13 @@ export default function DashboardPage() {
             <a href="/checkin" className="hidden rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 sm:inline-flex">
               Check-in
             </a>
+            <button
+              type="button"
+              onClick={openTutorial}
+              className="hidden rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 sm:inline-flex"
+            >
+              Tutorial
+            </button>
             <span className="hidden text-sm text-zinc-500 dark:text-zinc-400 lg:inline">{userEmail}</span>
             <button type="button" onClick={handleLogout} disabled={isLoggingOut}
               className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
@@ -1053,6 +1385,7 @@ export default function DashboardPage() {
           {mobileTab === "portfolio" && (
             <div className="space-y-6">
               {InsightsSection}
+              {SignalsSection}
               {/* Anchor menu mobile — solo nella tab portafoglio */}
               <div className="flex items-center gap-2 overflow-x-auto pb-1">
                 <button type="button" onClick={() => scrollTo(portfolioRef)} className="flex-shrink-0 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-900">📊 Portafoglio</button>
@@ -1096,6 +1429,7 @@ export default function DashboardPage() {
       <section className="mx-auto hidden w-full max-w-6xl px-4 py-8 pb-[620px] sm:px-6 lg:block lg:px-8">
         <div className="space-y-8">
           {InsightsSection}
+          {SignalsSection}
           {PortfolioSection}
           {MacroSection}
           {NewsSection}
@@ -1103,6 +1437,63 @@ export default function DashboardPage() {
       </section>
 
       {isChatMinimized ? ChatLauncher : CompanionPanel}
+
+      {isTutorialOpen && (
+        <>
+          <div className="fixed inset-0 z-[60] bg-zinc-950/55 backdrop-blur-sm" />
+          <div className="fixed inset-x-3 bottom-3 z-[70] sm:inset-x-auto sm:bottom-5 sm:right-5 sm:w-[420px]">
+            <div className="rounded-2xl border border-zinc-200 bg-white p-4 shadow-2xl dark:border-zinc-700 dark:bg-zinc-900">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <p className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                  Tutorial {tutorialStepIndex + 1}/{tutorialSteps.length}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => { void closeTutorial(true); }}
+                  disabled={isTutorialSaving}
+                  className="text-xs font-medium text-zinc-500 hover:text-zinc-700 disabled:opacity-60 dark:text-zinc-400 dark:hover:text-zinc-200"
+                >
+                  Salta
+                </button>
+              </div>
+              <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+                {tutorialSteps[tutorialStepIndex]?.title}
+              </h3>
+              <p className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-300">
+                {tutorialSteps[tutorialStepIndex]?.description}
+              </p>
+              <div className="mt-4 flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={() => goToTutorialStep(tutorialStepIndex - 1)}
+                  disabled={tutorialStepIndex === 0}
+                  className="rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200"
+                >
+                  Indietro
+                </button>
+                {tutorialStepIndex === tutorialSteps.length - 1 ? (
+                  <button
+                    type="button"
+                    onClick={() => { void closeTutorial(true); }}
+                    disabled={isTutorialSaving}
+                    className="rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-semibold text-white transition hover:bg-blue-500 disabled:opacity-60"
+                  >
+                    {isTutorialSaving ? "Salvataggio..." : "Fine"}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => goToTutorialStep(tutorialStepIndex + 1)}
+                    className="rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-semibold text-white transition hover:bg-blue-500"
+                  >
+                    Avanti
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
 
       {AddAssetModal}
     </main>
