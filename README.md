@@ -1,5 +1,11 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Folio Mate — roadmap
+
+| Stato | Voce |
+| ----- | ---- |
+| TODO | **Piani pricing: Free / Premium (e successivi tiers)** — definire limiti per piano (es. numero asset, refresh notizie, storico, piani automatici avanzati), **gating** delle funzionalità premium lato UI/API e preparazione al passo successivo **billing con Stripe** (checkout, webhooks, stato abbonamento in Supabase). |
+
 ## Getting Started
 
 First, run the development server:

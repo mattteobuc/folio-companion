@@ -171,6 +171,256 @@ function sanitizeDirectAdvice(text: string): string {
   return DIRECT_ADVICE_PATTERNS.reduce((acc, pattern) => acc.replace(pattern, "valuta"), text);
 }
 
+/** Profilo conversazionale utente (onboarding chat-first, senza form). */
+type MateProfileRow = {
+  id: string;
+  user_id: string;
+  primary_goal: string | null;
+  time_horizon: string | null;
+  volatility_comfort: string | null;
+  mate_style: string | null;
+  onboarding_status: string;
+  last_question_key: string | null;
+  source: string | null;
+};
+
+type OnboardingFieldKey = "goal" | "horizon" | "volatility" | "style";
+
+function isMissingMateProfileTable(error: { code?: string; message?: string }): boolean {
+  const code = error.code ?? "";
+  const msg = (error.message ?? "").toLowerCase();
+  return (
+    code === "42P01"
+    || msg.includes("user_mate_profile")
+    || msg.includes("does not exist")
+    || msg.includes("schema cache")
+  );
+}
+
+function isOnboardingSkipMessage(message: string): boolean {
+  const t = message.trim().toLowerCase();
+  return (
+    /\b(salta|skip)\b/i.test(t)
+    || /\bpi[uù]\s+tardi\b/i.test(t)
+    || /\bnon\s+ora\b/i.test(t)
+    || /^stop$/i.test(t)
+  );
+}
+
+/** Domanda “vera” sul portafoglio/macro: durante onboarding non blocca, ma passa a Claude. */
+function isSubstantiveChatDuringOnboarding(message: string): boolean {
+  const trimmed = message.trim();
+  if (trimmed.length > 160) return true;
+  if (detectPlanIntent(message)) return true;
+  const intent = detectUserIntent(message);
+  if (intent !== "generale") return true;
+  if (
+    /\b(portafoglio|etf|obligaz|obbligaz|azione|ticker|bce|fed|inflazione|tassi|prezzo|mercat)/i.test(trimmed)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function getNextOnboardingField(profile: MateProfileRow): OnboardingFieldKey | null {
+  if (!profile.primary_goal?.trim()) return "goal";
+  if (!profile.time_horizon?.trim()) return "horizon";
+  if (!profile.volatility_comfort?.trim()) return "volatility";
+  if (!profile.mate_style?.trim()) return "style";
+  return null;
+}
+
+function quickRepliesForOnboardingField(field: OnboardingFieldKey): string[] {
+  switch (field) {
+    case "goal":
+      return ["Crescita", "Reddito", "Stabilità", "Imparare", "Salta per ora"];
+    case "horizon":
+      return ["<1 anno", "1-3 anni", "3-7 anni", "7+ anni", "Salta per ora"];
+    case "volatility":
+      return ["Bassa", "Media", "Alta", "Salta per ora"];
+    case "style":
+      return ["Diretto", "Empatico", "Tecnico semplice", "Salta per ora"];
+    default:
+      return [];
+  }
+}
+
+function onboardingQuestionForField(field: OnboardingFieldKey): string {
+  switch (field) {
+    case "goal":
+      return "Dimmi cosa ti sta più a cuore adesso: più crescita nel tempo, reddito/ricavi, stabilità difensiva, o imparare e capire meglio i mercati?";
+    case "horizon":
+      return "Che orizzonte hai per questo capitale? Corto (sotto 1 anno), medio (1-3 anni), lungo (3-7), oppure molto lungo (oltre 7 anni)?";
+    case "volatility":
+      return "Come ti senti quando il mercato oscilla forte? Preferisci oscillazioni basse, medie, o sei ok anche con alta volatilità se è dentro il tuo piano?";
+    case "style":
+      return "Ultima cosa: preferisci che ti parli in modo diretto, più empatico e morbido, o tecnico ma in parole semplici?";
+    default:
+      return "Ok, continuiamo quando vuoi.";
+  }
+}
+
+function parseGoalFromText(raw: string): string | null {
+  const t = raw.trim().toLowerCase();
+  if (/^crescita$|^crescita\b/i.test(raw.trim())) return "crescita";
+  if (/^reddito$|^reddito\b/i.test(raw.trim())) return "reddito";
+  if (/^stabilit|^stabilita\b/i.test(t) || /^stabilità$/i.test(raw.trim())) return "stabilita";
+  if (/^imparare$|^imparare\b/i.test(raw.trim())) return "imparare";
+  if (/(crescita|accumul|lungo termine)/i.test(t) && !/(reddito|stabilit)/i.test(t)) return "crescita";
+  if (/(reddito|rendita|cash\s*flow|dividend)/i.test(t)) return "reddito";
+  if (/(stabilit|difens|prudent|bassa\s+volat)/i.test(t)) return "stabilita";
+  if (/(impar|studio|capire|capisco)/i.test(t)) return "imparare";
+  return null;
+}
+
+function parseHorizonFromText(raw: string): string | null {
+  const t = raw.trim().toLowerCase();
+  if (/(^|\b)<\s*1|sotto\s+l('| )?anno|meno\s+di\s+un\s+anno|breve\s+termine|corto\s+termine/i.test(t)) return "<1y";
+  if (/1\s*-\s*3|1-3|uno\s+tre|medio\s+termine/i.test(t)) return "1-3y";
+  if (/3\s*-\s*7|3-7|lungo\s+termine/i.test(t)) return "3-7y";
+  if (/7\s*\+|oltre\s+(il\s+)?7|molto\s+lungo|lunghissim/i.test(t)) return "7y+";
+  return null;
+}
+
+function parseVolatilityFromText(raw: string): string | null {
+  const t = raw.trim().toLowerCase();
+  if (/^bassa$/i.test(raw.trim()) || /(bass[a]|prudent|poca\s+volat)/i.test(t)) return "basso";
+  if (/^media$/i.test(raw.trim()) || /\bmedia\b/i.test(t)) return "medio";
+  if (/^alta$/i.test(raw.trim()) || /\balta\b|(aggress|alta\s+volat)/i.test(t)) return "alto";
+  return null;
+}
+
+function parseStyleFromText(raw: string): string | null {
+  const t = raw.trim().toLowerCase();
+  if (/^diretto$/i.test(raw.trim()) || /\bdiretto\b/i.test(t)) return "diretto";
+  if (/^empatico$/i.test(raw.trim()) || /empatic|rassicur|morbid/i.test(t)) return "empatico";
+  if (/tecnico/i.test(t) && /semplic/i.test(t)) return "tecnico-semplice";
+  if (/^tecnico semplice$/i.test(raw.trim())) return "tecnico-semplice";
+  return null;
+}
+
+function parseOnboardingField(field: OnboardingFieldKey, raw: string): string | null {
+  switch (field) {
+    case "goal":
+      return parseGoalFromText(raw);
+    case "horizon":
+      return parseHorizonFromText(raw);
+    case "volatility":
+      return parseVolatilityFromText(raw);
+    case "style":
+      return parseStyleFromText(raw);
+    default:
+      return null;
+  }
+}
+
+/** Estrae da messaggi lunghi eventuali preferenze senza forzare il flusso micro-domande. */
+function spontaneousProfilePatches(message: string): Partial<MateProfileRow> {
+  const patches: Partial<MateProfileRow> = {};
+  const g = parseGoalFromText(message);
+  const h = parseHorizonFromText(message);
+  const v = parseVolatilityFromText(message);
+  const s = parseStyleFromText(message);
+  if (g) patches.primary_goal = g;
+  if (h) patches.time_horizon = h;
+  if (v) patches.volatility_comfort = v;
+  if (s) patches.mate_style = s;
+  return patches;
+}
+
+function goalLabelIt(code: string | null): string {
+  switch (code) {
+    case "crescita":
+      return "crescita nel tempo";
+    case "reddito":
+      return "reddito / rendita";
+    case "stabilita":
+      return "stabilità difensiva";
+    case "imparare":
+      return "imparare e capire meglio";
+    default:
+      return "non specificato";
+  }
+}
+
+function horizonLabelIt(code: string | null): string {
+  switch (code) {
+    case "<1y":
+      return "sotto 1 anno";
+    case "1-3y":
+      return "1-3 anni";
+    case "3-7y":
+      return "3-7 anni";
+    case "7y+":
+      return "oltre 7 anni";
+    default:
+      return "non specificato";
+  }
+}
+
+function volatilityLabelIt(code: string | null): string {
+  switch (code) {
+    case "basso":
+      return "bassa tolleranza alle oscillazioni";
+    case "medio":
+      return "media tolleranza alle oscillazioni";
+    case "alto":
+      return "alta tolleranza alle oscillazioni";
+    default:
+      return "non specificato";
+  }
+}
+
+function styleLabelIt(code: string | null): string {
+  switch (code) {
+    case "diretto":
+      return "diretto";
+    case "empatico":
+      return "empatico";
+    case "tecnico-semplice":
+      return "tecnico in parole semplici";
+    default:
+      return "non specificato";
+  }
+}
+
+function formatUserProfilePrompt(profile: MateProfileRow | null): string {
+  if (!profile) {
+    return "Non disponibile (profilo non caricato). Non insistere con domande da questionario: resta utile e empatico.";
+  }
+  if (profile.onboarding_status === "skipped") {
+    return "L'utente ha saltato la profilazione guidata: non insistere, resta utile e adatta il tono di volta in volta.";
+  }
+  const parts = [
+    `Obiettivo dichiarato: ${goalLabelIt(profile.primary_goal)}.`,
+    `Orizzonte dichiarato: ${horizonLabelIt(profile.time_horizon)}.`,
+    `Comfort volatilità: ${volatilityLabelIt(profile.volatility_comfort)}.`,
+    `Stile conversazione preferito: ${styleLabelIt(profile.mate_style)}.`,
+  ];
+  return parts.join(" ");
+}
+
+function formatMatePolicyWithProfile(
+  signal: EmotionalSignal,
+  intent: UserIntent,
+  radar: string,
+  profileBlock: string,
+): string {
+  const base = formatMatePolicy(signal, intent, radar);
+  return `${base}\n\nProfilo utente (rispetta tono e preferenze):\n${profileBlock}`;
+}
+
+function buildOnboardingCompletionReply(profile: MateProfileRow): string {
+  return [
+    "Perfetto, ho salvato il tuo profilo.",
+    `- Obiettivo: ${goalLabelIt(profile.primary_goal)}`,
+    `- Orizzonte: ${horizonLabelIt(profile.time_horizon)}`,
+    `- Oscillazioni: ${volatilityLabelIt(profile.volatility_comfort)}`,
+    `- Stile: ${styleLabelIt(profile.mate_style)}`,
+    "Da qui ti seguo così. Dimmi pure cosa vuoi guardare nel portafoglio o nel contesto, senza fretta.",
+  ].join("\n");
+}
+
 function normalizeNumber(raw: string): number | null {
   const normalized = raw.replace(/\./g, "").replace(",", ".").replace(/[^\d.-]/g, "");
   const parsed = Number(normalized);
@@ -307,6 +557,8 @@ Il portafoglio dell'utente è composto da: [PORTFOLIO].
 [MEMORY]
 
 [DIARY]
+
+Profilo Mate (preferenze utente): [USER_PROFILE]
 
 [MATE_POLICY]
 
@@ -462,6 +714,30 @@ export async function POST(request: Request) {
         .update({ updated_at: new Date().toISOString() })
         .eq("id", ensuredSessionId);
     };
+
+    let mateProfilePersistenceAvailable = true;
+    let mateProfileRow: MateProfileRow | null = null;
+    const mateProfileSelect =
+      "id, user_id, primary_goal, time_horizon, volatility_comfort, mate_style, onboarding_status, last_question_key, source";
+    const { data: mateProfileData, error: mateProfileError } = await supabase
+      .from("user_mate_profile")
+      .select(mateProfileSelect)
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    if (mateProfileError) {
+      if (isMissingMateProfileTable(mateProfileError)) {
+        mateProfilePersistenceAvailable = false;
+        console.warn("Profilo Mate: fallback senza persistenza (schema non disponibile).", {
+          message: mateProfileError.message,
+          code: mateProfileError.code,
+        });
+      } else {
+        return NextResponse.json({ error: mateProfileError.message }, { status: 500 });
+      }
+    } else {
+      mateProfileRow = (mateProfileData as MateProfileRow | null) ?? null;
+    }
 
     let activeDraft: PlanDraftRow | null = null;
     let draftPersistenceAvailable = true;
@@ -683,6 +959,203 @@ export async function POST(request: Request) {
       return NextResponse.json({ reply, sessionId: ensuredSessionId });
     }
 
+    const mateOnboardingStatus = mateProfileRow?.onboarding_status ?? "not_started";
+    const isMateOnboardingActive =
+      mateOnboardingStatus === "not_started" || mateOnboardingStatus === "in_progress";
+
+    if (mateProfilePersistenceAvailable && mode === "chat" && userMessage && isMateOnboardingActive) {
+      if (isOnboardingSkipMessage(userMessage)) {
+        const { error: skipUpsertError } = await supabase.from("user_mate_profile").upsert(
+          {
+            user_id: user.id,
+            onboarding_status: "skipped",
+            last_question_key: null,
+            source: "chat_onboarding",
+          },
+          { onConflict: "user_id" },
+        );
+        if (skipUpsertError && !isMissingMateProfileTable(skipUpsertError)) {
+          return NextResponse.json({ error: skipUpsertError.message }, { status: 500 });
+        }
+        const skipReply =
+          "Va bene, saltiamo la profilazione. Ti rispondo comunque su tutto ciò che vuoi esplorare sul portafoglio e sul contesto, al tuo ritmo.";
+        await saveChatExchange(skipReply);
+        return NextResponse.json({
+          reply: skipReply,
+          sessionId: currentSessionId,
+          quickReplies: [],
+          mateOnboarding: "skipped",
+        });
+      }
+
+      if (isSubstantiveChatDuringOnboarding(userMessage)) {
+        const patches = spontaneousProfilePatches(userMessage);
+        if (Object.keys(patches).length > 0) {
+          if (!mateProfileRow) {
+            const { data: insertedProfile, error: insertProfileError } = await supabase
+              .from("user_mate_profile")
+              .insert({
+                user_id: user.id,
+                onboarding_status: "in_progress",
+                source: "chat_onboarding",
+                last_question_key: "goal",
+                ...patches,
+              })
+              .select(mateProfileSelect)
+              .single();
+            if (insertProfileError) {
+              if (isMissingMateProfileTable(insertProfileError)) {
+                mateProfilePersistenceAvailable = false;
+              } else {
+                return NextResponse.json({ error: insertProfileError.message }, { status: 500 });
+              }
+            } else {
+              mateProfileRow = insertedProfile as MateProfileRow;
+            }
+          } else {
+            const { error: patchError } = await supabase
+              .from("user_mate_profile")
+              .update({ ...patches, onboarding_status: "in_progress" })
+              .eq("user_id", user.id);
+            if (patchError && !isMissingMateProfileTable(patchError)) {
+              return NextResponse.json({ error: patchError.message }, { status: 500 });
+            }
+            const { data: refreshedProfile } = await supabase
+              .from("user_mate_profile")
+              .select(mateProfileSelect)
+              .eq("user_id", user.id)
+              .maybeSingle();
+            mateProfileRow = (refreshedProfile as MateProfileRow | null) ?? mateProfileRow;
+          }
+        }
+
+        if (mateProfileRow && getNextOnboardingField(mateProfileRow) === null) {
+          await supabase
+            .from("user_mate_profile")
+            .update({ onboarding_status: "completed", last_question_key: null })
+            .eq("user_id", user.id);
+          mateProfileRow = {
+            ...mateProfileRow,
+            onboarding_status: "completed",
+            last_question_key: null,
+          };
+        }
+      } else {
+        let profile = mateProfileRow;
+        if (!profile) {
+          const { data: insertedProfile, error: insertProfileError } = await supabase
+            .from("user_mate_profile")
+            .insert({
+              user_id: user.id,
+              onboarding_status: "in_progress",
+              source: "chat_onboarding",
+              last_question_key: "goal",
+            })
+            .select(mateProfileSelect)
+            .single();
+          if (insertProfileError) {
+            if (isMissingMateProfileTable(insertProfileError)) {
+              mateProfilePersistenceAvailable = false;
+            } else {
+              return NextResponse.json({ error: insertProfileError.message }, { status: 500 });
+            }
+          } else {
+            profile = insertedProfile as MateProfileRow;
+            mateProfileRow = profile;
+          }
+        }
+
+        if (mateProfilePersistenceAvailable && profile) {
+          const field = getNextOnboardingField(profile);
+          if (!field) {
+            await supabase
+              .from("user_mate_profile")
+              .update({ onboarding_status: "completed", last_question_key: null })
+              .eq("user_id", user.id);
+            const completedProfile = { ...profile, onboarding_status: "completed", last_question_key: null };
+            mateProfileRow = completedProfile;
+            const doneReply = buildOnboardingCompletionReply(completedProfile);
+            await saveChatExchange(doneReply);
+            return NextResponse.json({
+              reply: doneReply,
+              sessionId: currentSessionId,
+              quickReplies: [],
+              mateOnboarding: "completed",
+            });
+          }
+
+          const parsedValue = parseOnboardingField(field, userMessage);
+          if (!parsedValue) {
+            const clarifyReply = [
+              "Non ho capito bene, riproviamo in modo leggero.",
+              onboardingQuestionForField(field),
+              "Puoi usare un pulsante rapido oppure rispondere con parole tue.",
+            ].join(" ");
+            await saveChatExchange(clarifyReply);
+            return NextResponse.json({
+              reply: clarifyReply,
+              sessionId: currentSessionId,
+              quickReplies: quickRepliesForOnboardingField(field),
+              mateOnboarding: "active",
+            });
+          }
+
+          const columnName =
+            field === "goal"
+              ? "primary_goal"
+              : field === "horizon"
+                ? "time_horizon"
+                : field === "volatility"
+                  ? "volatility_comfort"
+                  : "mate_style";
+
+          const mergedProfile = { ...profile, [columnName]: parsedValue } as MateProfileRow;
+          const nextField = getNextOnboardingField(mergedProfile);
+          const onboardingCompleted = nextField === null;
+
+          const { error: progressError } = await supabase
+            .from("user_mate_profile")
+            .update({
+              [columnName]: parsedValue,
+              onboarding_status: onboardingCompleted ? "completed" : "in_progress",
+              last_question_key: onboardingCompleted ? null : nextField,
+            })
+            .eq("user_id", user.id);
+
+          if (progressError) {
+            return NextResponse.json({ error: progressError.message }, { status: 500 });
+          }
+
+          const nextMateProfile = {
+            ...mergedProfile,
+            onboarding_status: onboardingCompleted ? "completed" : "in_progress",
+            last_question_key: onboardingCompleted ? null : nextField,
+          } as MateProfileRow;
+          mateProfileRow = nextMateProfile;
+
+          if (onboardingCompleted) {
+            const doneReply = buildOnboardingCompletionReply(nextMateProfile);
+            await saveChatExchange(doneReply);
+            return NextResponse.json({
+              reply: doneReply,
+              sessionId: currentSessionId,
+              quickReplies: [],
+              mateOnboarding: "completed",
+            });
+          }
+
+          const stepReply = onboardingQuestionForField(nextField);
+          await saveChatExchange(stepReply);
+          return NextResponse.json({
+            reply: stepReply,
+            sessionId: currentSessionId,
+            quickReplies: quickRepliesForOnboardingField(nextField),
+            mateOnboarding: "active",
+          });
+        }
+      }
+    }
+
     // ── Carica portafoglio ──
     const { data: portfolios } = await supabase
       .from("portfolios").select("id").eq("user_id", user.id);
@@ -791,13 +1264,26 @@ export async function POST(request: Request) {
         : portfolioContext.split(",").map((item) => item.split(" ")[0]).filter(Boolean),
       plansContext,
     );
-    const matePolicy = formatMatePolicy(emotionalSignal, userIntent, proactiveRadar);
+
+    let mateProfileForPrompt: MateProfileRow | null = mateProfileRow;
+    if (mateProfilePersistenceAvailable) {
+      const { data: freshMateProfile } = await supabase
+        .from("user_mate_profile")
+        .select(mateProfileSelect)
+        .eq("user_id", user.id)
+        .maybeSingle();
+      mateProfileForPrompt = (freshMateProfile as MateProfileRow | null) ?? mateProfileRow;
+    }
+
+    const profilePromptText = formatUserProfilePrompt(mateProfileForPrompt);
+    const matePolicy = formatMatePolicyWithProfile(emotionalSignal, userIntent, proactiveRadar, profilePromptText);
 
     const systemPrompt = CHAT_SYSTEM_PROMPT_TEMPLATE
       .replace("[PORTFOLIO]", portfolioContext)
       .replace("[PLANS]", plansContext)
       .replace("[MEMORY]", memoryContext)
       .replace("[DIARY]", diaryContext)
+      .replace("[USER_PROFILE]", profilePromptText)
       .replace("[MATE_POLICY]", matePolicy);
 
     const messagesForClaude = [
@@ -877,7 +1363,29 @@ export async function POST(request: Request) {
       }
     }
 
-    return NextResponse.json({ reply, sessionId: currentSessionId });
+    let followUpQuickReplies: string[] = [];
+    let mateOnboardingFlag: "active" | "completed" | "skipped" | "idle" = "idle";
+    if (mateProfilePersistenceAvailable && mateProfileForPrompt) {
+      const profileState = mateProfileForPrompt.onboarding_status;
+      if (profileState === "not_started" || profileState === "in_progress") {
+        const pendingField = getNextOnboardingField(mateProfileForPrompt);
+        if (pendingField) {
+          followUpQuickReplies = quickRepliesForOnboardingField(pendingField);
+          mateOnboardingFlag = "active";
+        }
+      } else if (profileState === "skipped") {
+        mateOnboardingFlag = "skipped";
+      } else if (profileState === "completed") {
+        mateOnboardingFlag = "completed";
+      }
+    }
+
+    return NextResponse.json({
+      reply,
+      sessionId: currentSessionId,
+      quickReplies: followUpQuickReplies,
+      mateOnboarding: mateOnboardingFlag,
+    });
   } catch (error) {
     console.error("Errore route /api/chat:", error);
     return NextResponse.json({ error: "Errore inatteso durante la chat." }, { status: 500 });

@@ -161,6 +161,72 @@ const INSIGHTS_CACHE_KEY = "folio:insights-cache:v1";
 const INSIGHTS_CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 const TUTORIAL_COMPLETED_LOCAL_KEY = "folio:tutorial-completed:v1";
 const INITIAL_CHAT_MESSAGE = "Ciao! Sono il tuo mate finanziario. Puoi chiedermi tutto sul tuo portafoglio, sulle notizie di mercato o sugli eventi macro. Non ti daro mai consigli diretti di acquisto o vendita, ma ti aiutero a capire meglio il contesto.";
+
+/** Messaggio iniziale onboarding chat-first (allineato alla prima domanda server). */
+const MATE_ONBOARDING_KICKOFF_MESSAGE = [
+  "Ciao! Sono il tuo mate finanziario.",
+  "",
+  "Per seguirti meglio ti faccio 3 domande rapide (circa 30 secondi). Se vuoi puoi saltare e iniziamo subito.",
+  "",
+  "Primissima cosa: cosa ti sta più a cuore adesso tra crescita nel tempo, reddito/rendita, stabilità difensiva, o imparare a capire meglio i mercati?",
+].join("\n");
+
+const MATE_ONBOARDING_QUICK_GOAL = ["Crescita", "Reddito", "Stabilità", "Imparare", "Salta per ora"];
+
+/** Snapshot campi profilo (allineato a `user_mate_profile`) per ripresa onboarding lato UI. */
+type MateOnboardingFieldsSnapshot = {
+  primary_goal: string | null;
+  time_horizon: string | null;
+  volatility_comfort: string | null;
+  mate_style: string | null;
+};
+
+/** Riga lettura Supabase (fallback typed perché .maybeSingle() con errore restringe male `data`). */
+type MateProfileDbRow = MateOnboardingFieldsSnapshot & { onboarding_status: string };
+
+type MateOnboardingStepKey = "goal" | "horizon" | "volatility" | "style";
+
+function getNextMateOnboardingStep(row: Partial<MateOnboardingFieldsSnapshot>): MateOnboardingStepKey | null {
+  if (!row.primary_goal?.trim()) return "goal";
+  if (!row.time_horizon?.trim()) return "horizon";
+  if (!row.volatility_comfort?.trim()) return "volatility";
+  if (!row.mate_style?.trim()) return "style";
+  return null;
+}
+
+function mateOnboardingQuestionForStep(step: MateOnboardingStepKey): string {
+  switch (step) {
+    case "goal":
+      return "Dimmi cosa ti sta più a cuore adesso: più crescita nel tempo, reddito/ricavi, stabilità difensiva, o imparare e capire meglio i mercati?";
+    case "horizon":
+      return "Che orizzonte hai per questo capitale? Corto (sotto 1 anno), medio (1-3 anni), lungo (3-7), oppure molto lungo (oltre 7 anni)?";
+    case "volatility":
+      return "Come ti senti quando il mercato oscilla forte? Preferisci oscillazioni basse, medie, o sei ok anche con alta volatilità se è dentro il tuo piano?";
+    case "style":
+      return "Ultima cosa: preferisci che ti parli in modo diretto, più empatico e morbido, o tecnico ma in parole semplici?";
+    default:
+      return "";
+  }
+}
+
+function mateOnboardingQuickRepliesForStep(step: MateOnboardingStepKey): string[] {
+  switch (step) {
+    case "goal":
+      return [...MATE_ONBOARDING_QUICK_GOAL];
+    case "horizon":
+      return ["<1 anno", "1-3 anni", "3-7 anni", "7+ anni", "Salta per ora"];
+    case "volatility":
+      return ["Bassa", "Media", "Alta", "Salta per ora"];
+    case "style":
+      return ["Diretto", "Empatico", "Tecnico semplice", "Salta per ora"];
+    default:
+      return [];
+  }
+}
+
+const MATE_ONBOARDING_RESUME_PREFIX = "Riprendiamo da dove eravamo.\n\n";
+
+type MateOnboardingStatusDb = "not_started" | "in_progress" | "completed" | "skipped";
 const IMPORT_AUTO_CONFIDENCE_THRESHOLD = 0.75;
 const IMPORT_DUPLICATE_FUZZY_THRESHOLD = 0.8;
 
@@ -269,6 +335,9 @@ export default function DashboardPage() {
   const [expandedInsightIds, setExpandedInsightIds] = useState<Record<number, boolean>>({});
 
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([{ role: "assistant", content: INITIAL_CHAT_MESSAGE }]);
+  const [mateOnboardingStatus, setMateOnboardingStatus] = useState<MateOnboardingStatusDb | null>(null);
+  const [mateOnboardingFields, setMateOnboardingFields] = useState<MateOnboardingFieldsSnapshot | null>(null);
+  const [mateQuickReplies, setMateQuickReplies] = useState<string[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [isSendingChat, setIsSendingChat] = useState(false);
   const [chatErrorMessage, setChatErrorMessage] = useState<string | null>(null);
@@ -340,6 +409,7 @@ export default function DashboardPage() {
   const diaryButtonRef = useRef<HTMLAnchorElement | null>(null);
   const importButtonRef = useRef<HTMLButtonElement | null>(null);
   const analysisButtonRef = useRef<HTMLButtonElement | null>(null);
+  const onboardingChatBootstrappedRef = useRef(false);
 
   useEffect(() => {
     chatMessagesRef.current = chatMessages;
@@ -782,6 +852,87 @@ export default function DashboardPage() {
       if (!user) { router.push("/login"); router.refresh(); return; }
       setCurrentUserId(user.id);
       setUserEmail(user.email ?? "");
+      const { data: mateProfileRaw, error: mateProfileReadError } = await supabase
+        .from("user_mate_profile")
+        .select("onboarding_status, primary_goal, time_horizon, volatility_comfort, mate_style")
+        .eq("user_id", user.id)
+        .maybeSingle();
+      const mateProfileRow = mateProfileRaw as MateProfileDbRow | null;
+
+      let resolvedMateStatus: MateOnboardingStatusDb = "not_started";
+      let resolvedMateFields: MateOnboardingFieldsSnapshot | null = null;
+      const emptyMateFields = (): MateOnboardingFieldsSnapshot => ({
+        primary_goal: null,
+        time_horizon: null,
+        volatility_comfort: null,
+        mate_style: null,
+      });
+
+      if (mateProfileReadError) {
+        const msg = (mateProfileReadError.message ?? "").toLowerCase();
+        const missing =
+          mateProfileReadError.code === "42P01"
+          || msg.includes("user_mate_profile")
+          || msg.includes("does not exist")
+          || msg.includes("schema cache");
+        if (missing) {
+          resolvedMateStatus = "completed";
+          resolvedMateFields = null;
+        } else {
+          console.warn("Errore lettura profilo Mate:", {
+            message: mateProfileReadError.message,
+            code: mateProfileReadError.code,
+          });
+          resolvedMateStatus = (mateProfileRow?.onboarding_status as MateOnboardingStatusDb | undefined) ?? "not_started";
+          resolvedMateFields = {
+            primary_goal: mateProfileRow?.primary_goal ?? null,
+            time_horizon: mateProfileRow?.time_horizon ?? null,
+            volatility_comfort: mateProfileRow?.volatility_comfort ?? null,
+            mate_style: mateProfileRow?.mate_style ?? null,
+          };
+        }
+      } else {
+        resolvedMateStatus = (mateProfileRow?.onboarding_status as MateOnboardingStatusDb | undefined) ?? "not_started";
+        resolvedMateFields = mateProfileRow
+          ? {
+              primary_goal: mateProfileRow.primary_goal ?? null,
+              time_horizon: mateProfileRow.time_horizon ?? null,
+              volatility_comfort: mateProfileRow.volatility_comfort ?? null,
+              mate_style: mateProfileRow.mate_style ?? null,
+            }
+          : emptyMateFields();
+      }
+
+      setMateOnboardingStatus(resolvedMateStatus);
+      setMateOnboardingFields(resolvedMateFields);
+
+      if (
+        !onboardingChatBootstrappedRef.current
+        && !currentSessionIdRef.current
+        && (resolvedMateStatus === "not_started" || resolvedMateStatus === "in_progress")
+      ) {
+        const msgs = chatMessagesRef.current;
+        if (msgs.length === 1 && msgs[0].role === "assistant" && msgs[0].content === INITIAL_CHAT_MESSAGE) {
+          if (resolvedMateStatus === "not_started") {
+            onboardingChatBootstrappedRef.current = true;
+            const kickoff: ChatMessage[] = [{ role: "assistant", content: MATE_ONBOARDING_KICKOFF_MESSAGE }];
+            setChatMessages(kickoff);
+            chatMessagesRef.current = kickoff;
+            setMateQuickReplies(MATE_ONBOARDING_QUICK_GOAL);
+          } else {
+            const nextStep = getNextMateOnboardingStep(resolvedMateFields ?? {});
+            if (nextStep) {
+              onboardingChatBootstrappedRef.current = true;
+              const resumeContent = `${MATE_ONBOARDING_RESUME_PREFIX}${mateOnboardingQuestionForStep(nextStep)}`;
+              const resumeMsg: ChatMessage[] = [{ role: "assistant", content: resumeContent }];
+              setChatMessages(resumeMsg);
+              chatMessagesRef.current = resumeMsg;
+              setMateQuickReplies(mateOnboardingQuickRepliesForStep(nextStep));
+            }
+          }
+        }
+      }
+
       const loadedPortfolios = await ensureDefaultPortfolio(user.id);
       const portfolioIds = loadedPortfolios.map((p) => p.id);
       const loadedAssets = await loadAssets(portfolioIds);
@@ -799,6 +950,36 @@ export default function DashboardPage() {
     } catch (e) { setErrorMessage(e instanceof Error ? e.message : "Errore inatteso."); }
     finally { setIsPageLoading(false); }
   }, [ensureDefaultPortfolio, loadAssets, loadPrices, loadMacroContext, loadNews, loadChatSessions, loadInsights, hasTutorialAutostartChecked, getTutorialCompleted, router, supabase, loadPurchasePlans]);
+
+  const refreshMateOnboardingSnapshot = useCallback(async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+    const { data: row, error } = await supabase
+      .from("user_mate_profile")
+      .select("onboarding_status, primary_goal, time_horizon, volatility_comfort, mate_style")
+      .eq("user_id", user.id)
+      .maybeSingle();
+    if (error) {
+      const msg = (error.message ?? "").toLowerCase();
+      const missing =
+        error.code === "42P01"
+        || msg.includes("user_mate_profile")
+        || msg.includes("does not exist")
+        || msg.includes("schema cache");
+      if (missing) {
+        setMateOnboardingStatus("completed");
+        setMateOnboardingFields(null);
+      }
+      return;
+    }
+    setMateOnboardingStatus((row?.onboarding_status as MateOnboardingStatusDb | undefined) ?? "not_started");
+    setMateOnboardingFields({
+      primary_goal: row?.primary_goal ?? null,
+      time_horizon: row?.time_horizon ?? null,
+      volatility_comfort: row?.volatility_comfort ?? null,
+      mate_style: row?.mate_style ?? null,
+    });
+  }, [supabase]);
 
   useEffect(() => {
     const id = window.requestAnimationFrame(() => { void loadDashboardData(); });
@@ -1407,9 +1588,24 @@ export default function DashboardPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: trimmedInput, history: historyForApi, sessionId: sessionIdForApi }),
       });
-      const payload = (await res.json()) as { reply?: string; sessionId?: string; error?: string };
+      const payload = (await res.json()) as {
+        reply?: string;
+        sessionId?: string;
+        error?: string;
+        quickReplies?: string[];
+        mateOnboarding?: "active" | "completed" | "skipped" | "idle";
+      };
       if (!res.ok || !payload.reply) throw new Error(payload.error);
       setChatMessages((prev) => [...prev, { role: "assistant", content: payload.reply! }]);
+      setMateQuickReplies(Array.isArray(payload.quickReplies) ? payload.quickReplies : []);
+      if (payload.mateOnboarding === "completed") setMateOnboardingStatus("completed");
+      else if (payload.mateOnboarding === "skipped") setMateOnboardingStatus("skipped");
+      else if (payload.mateOnboarding === "active") {
+        setMateOnboardingStatus((prev) => (prev === "completed" || prev === "skipped" ? prev : "in_progress"));
+      }
+      if (payload.mateOnboarding && payload.mateOnboarding !== "idle") {
+        void refreshMateOnboardingSnapshot();
+      }
       if (payload.sessionId && !currentSessionIdRef.current) {
         setCurrentSessionId(payload.sessionId);
         currentSessionIdRef.current = payload.sessionId;
@@ -1421,11 +1617,12 @@ export default function DashboardPage() {
     } finally {
       setIsSendingChat(false);
     }
-  }, [isSendingChat, loadChatSessions, loadPurchasePlans]);
+  }, [isSendingChat, loadChatSessions, loadPurchasePlans, refreshMateOnboardingSnapshot]);
 
   const startPlanMode = useCallback(async () => {
     if (isSendingChat) return;
     setChatErrorMessage(null);
+    setMateQuickReplies([]);
     setIsSendingChat(true);
     const cleanHistory: ChatMessage[] = [];
     setChatMessages(cleanHistory);
@@ -1464,6 +1661,7 @@ export default function DashboardPage() {
   };
 
   const handleLoadSession = async (sessionId: string) => {
+    setMateQuickReplies([]);
     setIsLoadingSession(true); setIsHistoryOpen(false);
     try {
       const { data, error } = await supabase.from("chat_messages").select("role, content").eq("session_id", sessionId).order("created_at", { ascending: true });
@@ -1479,8 +1677,34 @@ export default function DashboardPage() {
   };
 
   const handleNewChat = () => {
-    setChatMessages([{ role: "assistant", content: INITIAL_CHAT_MESSAGE }]);
-    chatMessagesRef.current = [{ role: "assistant", content: INITIAL_CHAT_MESSAGE }];
+    onboardingChatBootstrappedRef.current = true;
+    const onboardingAgain =
+      mateOnboardingStatus === "not_started" || mateOnboardingStatus === "in_progress";
+    if (onboardingAgain) {
+      if (mateOnboardingStatus === "not_started") {
+        const kickoff: ChatMessage[] = [{ role: "assistant", content: MATE_ONBOARDING_KICKOFF_MESSAGE }];
+        setChatMessages(kickoff);
+        chatMessagesRef.current = kickoff;
+        setMateQuickReplies(MATE_ONBOARDING_QUICK_GOAL);
+      } else {
+        const next = getNextMateOnboardingStep(mateOnboardingFields ?? {});
+        if (next) {
+          const resumeContent = `${MATE_ONBOARDING_RESUME_PREFIX}${mateOnboardingQuestionForStep(next)}`;
+          const resumeMsg: ChatMessage[] = [{ role: "assistant", content: resumeContent }];
+          setChatMessages(resumeMsg);
+          chatMessagesRef.current = resumeMsg;
+          setMateQuickReplies(mateOnboardingQuickRepliesForStep(next));
+        } else {
+          setChatMessages([{ role: "assistant", content: INITIAL_CHAT_MESSAGE }]);
+          chatMessagesRef.current = [{ role: "assistant", content: INITIAL_CHAT_MESSAGE }];
+          setMateQuickReplies([]);
+        }
+      }
+    } else {
+      setChatMessages([{ role: "assistant", content: INITIAL_CHAT_MESSAGE }]);
+      chatMessagesRef.current = [{ role: "assistant", content: INITIAL_CHAT_MESSAGE }];
+      setMateQuickReplies([]);
+    }
     setCurrentSessionId(null);
     currentSessionIdRef.current = null;
     setChatErrorMessage(null);
@@ -2255,6 +2479,21 @@ export default function DashboardPage() {
               <div ref={chatBottomRef} />
             </div>
             <div className="border-t border-zinc-200 p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] dark:border-zinc-800">
+              {mateQuickReplies.length > 0 && (
+                <div data-testid="mate-quick-replies" className="mb-2 flex flex-wrap gap-2">
+                  {mateQuickReplies.map((label) => (
+                    <button
+                      key={label}
+                      type="button"
+                      disabled={isSendingChat}
+                      onClick={() => void sendUserMessage(label)}
+                      className="rounded-full border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition hover:border-blue-400 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:border-blue-500 dark:hover:text-blue-300"
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
               {chatErrorMessage && <p className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{chatErrorMessage}</p>}
               <button
                 type="button"
