@@ -24,3 +24,50 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+@keyframes fadeInUp {
+  0% { opacity: 0; transform: translateY(8px); }
+  20%, 100% { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulseHighlight {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.35); }
+  50% { box-shadow: 0 0 0 8px rgba(251, 191, 36, 0); }
+}
+
+@keyframes riskGrow {
+  0% { transform: scale(0.5); opacity: 0; }
+  20%, 100% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes warningAppear {
+  0%, 25% { opacity: 0; transform: translateY(6px); }
+  40%, 100% { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes timelineAlert {
+  0%, 35% { opacity: 0.4; transform: translateX(-4px); }
+  45%, 100% { opacity: 1; transform: translateX(0); }
+}
+
+.chat-input-anim { animation: fadeInUp 9s ease-in-out infinite; }
+.chat-user-anim { animation: fadeInUp 9s ease-in-out infinite 1s; }
+.chat-ai-anim { animation: fadeInUp 9s ease-in-out infinite 2s; }
+.chat-tag-anim { animation: fadeInUp 9s ease-in-out infinite 3s; }
+.import-row-anim { animation: fadeInUp 7s ease-in-out infinite; }
+.import-row-anim-delayed { animation: fadeInUp 7s ease-in-out infinite 0.8s; }
+.import-row-anim-late { animation: fadeInUp 7s ease-in-out infinite 1.6s; }
+.insight-highlight { animation: pulseHighlight 2.6s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-input-anim,
+  .chat-user-anim,
+  .chat-ai-anim,
+  .chat-tag-anim,
+  .import-row-anim,
+  .import-row-anim-delayed,
+  .import-row-anim-late,
+  .insight-highlight {
+    animation: none !important;
+  }
+}
