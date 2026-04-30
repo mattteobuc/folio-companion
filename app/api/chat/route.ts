@@ -66,6 +66,16 @@ type PlanDraftValues = {
   risk_note: string | null;
 };
 
+type EmotionalSignal = "ansia" | "dubbio" | "paura" | "fomo" | "confusione" | "tecnico" | "neutro";
+type UserIntent =
+  | "analisi_portafoglio"
+  | "notizia"
+  | "macro"
+  | "opportunita"
+  | "rischio"
+  | "piano_azione"
+  | "generale";
+
 const PLAN_INTENT_PATTERNS = [
   /\bcrea(?:re)?\s+(?:un\s+)?piano\b/i,
   /\bnuovo\s+piano\b/i,
@@ -75,6 +85,18 @@ const PLAN_INTENT_PATTERNS = [
 ];
 const PLAN_CANCEL_PATTERNS = [/\bannulla\b/i, /\bcancel\b/i, /\bstop\b/i, /\bferma\b/i];
 const PLAN_CONFIRM_PATTERNS = [/\bconfermo\b/i, /\bconferma\b/i, /\bok\b/i, /\bva bene\b/i];
+const PLAN_EXPLORATION_PATTERNS = [
+  /inflazione/i,
+  /protegg/i,
+  /rischio/i,
+  /volatilit/i,
+  /obiettiv/i,
+  /lungo periodo/i,
+  /breve periodo/i,
+  /entrate/i,
+  /uscite/i,
+];
+const DIRECT_ADVICE_PATTERNS = [/\bcompra(?:re|)\b/gi, /\bvendi(?:ta|)\b/gi, /\bacquista(?:re|)\b/gi];
 
 function detectPlanIntent(message: string): boolean {
   return PLAN_INTENT_PATTERNS.some((pattern) => pattern.test(message));
@@ -86,6 +108,67 @@ function isPlanCancellation(message: string): boolean {
 
 function isPlanConfirmation(message: string): boolean {
   return PLAN_CONFIRM_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+function needsExploration(message: string): boolean {
+  return PLAN_EXPLORATION_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+function detectEmotionalSignal(message: string): EmotionalSignal {
+  if (/(ansia|agit|preoccup|stress|panic)/i.test(message)) return "ansia";
+  if (/(non capisco|confus|non mi e chiaro|spiegami meglio)/i.test(message)) return "confusione";
+  if (/(paura|timore|perdere soldi|drawdown|crollo)/i.test(message)) return "paura";
+  if (/(fomo|sto perdendo il treno|tutti stanno)/i.test(message)) return "fomo";
+  if (/(forse|non so|indecis|dubbio)/i.test(message)) return "dubbio";
+  if (/(beta|duration|p\/e|valuation|volatility|var|correlazione|yield)/i.test(message)) return "tecnico";
+  return "neutro";
+}
+
+function detectUserIntent(message: string): UserIntent {
+  if (/(portafoglio|allocazione|peso|diversific)/i.test(message)) return "analisi_portafoglio";
+  if (/(notizia|news|articolo|headline)/i.test(message)) return "notizia";
+  if (/(macro|inflazione|tassi|fed|bce|pil|occupazione)/i.test(message)) return "macro";
+  if (/(opportunit|settore|mercato da seguire|watchlist|cosa studiare)/i.test(message)) return "opportunita";
+  if (/(rischio|volatilit|drawdown|copertura|protegg)/i.test(message)) return "rischio";
+  if (/(cosa faccio|prossimi passi|piano d'azione|azione concreta)/i.test(message)) return "piano_azione";
+  return "generale";
+}
+
+function buildProactiveRadar(portfolioTickers: string[], news: string): string {
+  const seedTicker = portfolioTickers[0] ?? "MSCI World";
+  const seedNewsLabel = news.includes("Nessuna") ? "assenza di news forti" : "ultime notizie di mercato";
+  return [
+    `- Mercato/tema: tassi reali e inflazione attesa (rilevante per valutazioni growth vs value).`,
+    `- Settore da osservare: tecnologia quality e industriali europei, per capire rotazione rischio.`,
+    `- Ticker da studiare: ${seedTicker} e un ETF difensivo obbligazionario globale (solo studio, non operativita).`,
+    `- Perche ora: ${seedNewsLabel}, fase utile per monitorare correlazioni e non reagire impulsivamente.`,
+  ].join("\n");
+}
+
+function formatMatePolicy(signal: EmotionalSignal, intent: UserIntent, radar: string): string {
+  return [
+    `Segnale emotivo rilevato: ${signal}.`,
+    `Intent principale: ${intent}.`,
+    "",
+    "Struttura risposta OBBLIGATORIA:",
+    "1) Apertura empatica (1 frase, concreta).",
+    "2) 2-3 scenari o opzioni pratiche (bullet brevi, non generiche).",
+    "3) Cosa monitorare nei prossimi giorni (almeno 1 bullet).",
+    "4) Radar proattivo (mercato, settore, 1-2 ticker da studiare) con motivazione.",
+    "5) Chiusura non direttiva orientata a processo.",
+    "",
+    "Guardrail:",
+    "- Vietato linguaggio di consiglio diretto buy/sell.",
+    "- Evita frasi vaghe tipo 'dimmi cosa vuoi approfondire'.",
+    "- Se manca un dato, fai solo una domanda guidata e specifica.",
+    "",
+    "Radar proattivo suggerito:",
+    radar,
+  ].join("\n");
+}
+
+function sanitizeDirectAdvice(text: string): string {
+  return DIRECT_ADVICE_PATTERNS.reduce((acc, pattern) => acc.replace(pattern, "valuta"), text);
 }
 
 function normalizeNumber(raw: string): number | null {
@@ -170,6 +253,51 @@ function buildPlanSummary(draft: PlanDraftValues): string {
     "Confermi questo piano?",
   ].join("\n");
 }
+
+function assistantAskedForConfirmation(content: string): boolean {
+  return /confermi/i.test(content) && /piano/i.test(content);
+}
+
+function deriveDraftFromHistory(history: ChatMessage[]): { draft: PlanDraftValues; awaitingConfirmation: boolean } {
+  const draft: PlanDraftValues = {
+    title: null,
+    ticker: null,
+    cadence: null,
+    amount: null,
+    start_date: null,
+    monthly_budget_limit: null,
+    risk_note: null,
+  };
+  let awaitingConfirmation = false;
+
+  for (const message of history) {
+    if (message.role === "assistant") {
+      if (assistantAskedForConfirmation(message.content)) {
+        awaitingConfirmation = true;
+      }
+      continue;
+    }
+
+    const userText = message.content.trim();
+    if (!userText) continue;
+    if (isPlanCancellation(userText)) {
+      awaitingConfirmation = false;
+      continue;
+    }
+    if (awaitingConfirmation && isPlanConfirmation(userText)) {
+      awaitingConfirmation = false;
+      continue;
+    }
+
+    const parsed = parseDraftUpdates(userText);
+    if (!parsed.title && !detectPlanIntent(userText) && !isPlanConfirmation(userText) && !isPlanCancellation(userText) && !draft.title) {
+      parsed.title = userText;
+    }
+    Object.assign(draft, parsed);
+  }
+
+  return { draft, awaitingConfirmation };
+}
 const CHAT_SYSTEM_PROMPT_TEMPLATE = `Sei Folio, un mate finanziario personale caldo, colloquiale e proattivo. Parli come una persona reale: diretto, umano, rassicurante quando serve, senza tono da consulente formale.
 
 Il portafoglio dell'utente è composto da: [PORTFOLIO].
@@ -179,6 +307,8 @@ Il portafoglio dell'utente è composto da: [PORTFOLIO].
 [MEMORY]
 
 [DIARY]
+
+[MATE_POLICY]
 
 Linee guida:
 - Inizia con una micro-validazione emotiva (1 frase breve), soprattutto se l'utente mostra ansia, dubbio o frustrazione.
@@ -275,8 +405,11 @@ export async function POST(request: Request) {
       message?: string;
       history?: ChatMessage[];
       sessionId?: string | null;
+      mode?: "chat" | "plan_start";
     };
 
+    const mode = body.mode ?? "chat";
+    const isPlanStart = mode === "plan_start";
     const userMessage = body.message?.trim() ?? "";
     const history = (body.history ?? []).filter(
       (msg): msg is ChatMessage =>
@@ -284,7 +417,7 @@ export async function POST(request: Request) {
     );
     const sessionId = body.sessionId ?? null;
 
-    if (!userMessage) {
+    if (!isPlanStart && !userMessage) {
       return NextResponse.json({ error: "Messaggio non valido." }, { status: 400 });
     }
 
@@ -319,18 +452,61 @@ export async function POST(request: Request) {
         .eq("id", ensuredSessionId);
     };
 
+    const saveAssistantMessage = async (replyContent: string, forcedSessionId?: string) => {
+      const ensuredSessionId = forcedSessionId ?? await ensureChatSession("Creazione piano");
+      if (!ensuredSessionId) return;
+      await supabase.from("chat_messages").insert([
+        { session_id: ensuredSessionId, role: "assistant", content: replyContent },
+      ]);
+      await supabase.from("chat_sessions")
+        .update({ updated_at: new Date().toISOString() })
+        .eq("id", ensuredSessionId);
+    };
+
     let activeDraft: PlanDraftRow | null = null;
+    let draftPersistenceAvailable = true;
     if (currentSessionId) {
-      const { data: draftRow } = await supabase
+      const { data: draftRow, error: draftError } = await supabase
         .from("chat_plan_drafts")
         .select("id, user_id, session_id, title, ticker, cadence, amount, start_date, monthly_budget_limit, risk_note, step, awaiting_confirmation")
         .eq("session_id", currentSessionId)
         .eq("user_id", user.id)
         .maybeSingle();
+      if (draftError) {
+        const errorCode = (draftError as { code?: string }).code ?? "";
+        const errorMessage = (draftError as { message?: string }).message ?? "";
+        const isMissingTable = errorCode === "42P01" || errorMessage.toLowerCase().includes("chat_plan_drafts");
+        if (!isMissingTable) {
+          return NextResponse.json({ error: "Errore nel recupero della bozza piano." }, { status: 500 });
+        }
+        draftPersistenceAvailable = false;
+      }
       activeDraft = (draftRow as PlanDraftRow | null) ?? null;
     }
 
-    const shouldEnterPlanMode = Boolean(activeDraft) || detectPlanIntent(userMessage);
+    if (isPlanStart && !activeDraft && draftPersistenceAvailable) {
+      const { data: latestDraft, error: latestDraftError } = await supabase
+        .from("chat_plan_drafts")
+        .select("id, user_id, session_id, title, ticker, cadence, amount, start_date, monthly_budget_limit, risk_note, step, awaiting_confirmation")
+        .eq("user_id", user.id)
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (latestDraftError) {
+        const errorCode = (latestDraftError as { code?: string }).code ?? "";
+        const errorMessage = (latestDraftError as { message?: string }).message ?? "";
+        const isMissingTable = errorCode === "42P01" || errorMessage.toLowerCase().includes("chat_plan_drafts");
+        if (!isMissingTable) {
+          return NextResponse.json({ error: "Errore nel recupero della bozza piano." }, { status: 500 });
+        }
+        draftPersistenceAvailable = false;
+      } else if (latestDraft) {
+        currentSessionId = latestDraft.session_id;
+        activeDraft = latestDraft as PlanDraftRow;
+      }
+    }
+
+    const shouldEnterPlanMode = isPlanStart || Boolean(activeDraft) || detectPlanIntent(userMessage);
 
     if (shouldEnterPlanMode) {
       const ensuredSessionId = await ensureChatSession("Creazione piano");
@@ -338,13 +514,22 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "Non sono riuscito ad avviare la sessione del piano." }, { status: 500 });
       }
 
-      if (!activeDraft) {
-        const { data: draftRow } = await supabase
+      if (!activeDraft && draftPersistenceAvailable) {
+        const { data: draftRow, error: draftError } = await supabase
           .from("chat_plan_drafts")
           .select("id, user_id, session_id, title, ticker, cadence, amount, start_date, monthly_budget_limit, risk_note, step, awaiting_confirmation")
           .eq("session_id", ensuredSessionId)
           .eq("user_id", user.id)
           .maybeSingle();
+        if (draftError) {
+          const errorCode = (draftError as { code?: string }).code ?? "";
+          const errorMessage = (draftError as { message?: string }).message ?? "";
+          const isMissingTable = errorCode === "42P01" || errorMessage.toLowerCase().includes("chat_plan_drafts");
+          if (!isMissingTable) {
+            return NextResponse.json({ error: "Errore nel recupero della bozza piano." }, { status: 500 });
+          }
+          draftPersistenceAvailable = false;
+        }
         activeDraft = (draftRow as PlanDraftRow | null) ?? null;
       }
 
@@ -355,18 +540,22 @@ export async function POST(request: Request) {
         return NextResponse.json({ reply, sessionId: ensuredSessionId });
       }
 
-      const draftValues: PlanDraftValues = {
-        title: activeDraft?.title ?? null,
-        ticker: activeDraft?.ticker ?? null,
-        cadence: activeDraft?.cadence ?? null,
-        amount: activeDraft?.amount ?? null,
-        start_date: activeDraft?.start_date ?? null,
-        monthly_budget_limit: activeDraft?.monthly_budget_limit ?? null,
-        risk_note: activeDraft?.risk_note ?? null,
-      };
+      const draftValues: PlanDraftValues = draftPersistenceAvailable
+        ? {
+          title: activeDraft?.title ?? null,
+          ticker: activeDraft?.ticker ?? null,
+          cadence: activeDraft?.cadence ?? null,
+          amount: activeDraft?.amount ?? null,
+          start_date: activeDraft?.start_date ?? null,
+          monthly_budget_limit: activeDraft?.monthly_budget_limit ?? null,
+          risk_note: activeDraft?.risk_note ?? null,
+        }
+        : deriveDraftFromHistory(history).draft;
 
       const parsedUpdates = parseDraftUpdates(userMessage);
       if (
+        !isPlanStart
+        &&
         !parsedUpdates.title
         && !detectPlanIntent(userMessage)
         && !isPlanConfirmation(userMessage)
@@ -383,9 +572,19 @@ export async function POST(request: Request) {
 
       const nextStep = getNextPlanStep(mergedDraft);
       let reply = "";
-      let awaitingConfirmation = activeDraft?.awaiting_confirmation ?? false;
+      let awaitingConfirmation = draftPersistenceAvailable
+        ? activeDraft?.awaiting_confirmation ?? false
+        : deriveDraftFromHistory(history).awaitingConfirmation;
 
-      if (awaitingConfirmation && isPlanConfirmation(userMessage)) {
+      if (isPlanStart) {
+        if (nextStep) {
+          awaitingConfirmation = false;
+          reply = getPlanQuestion(nextStep);
+        } else {
+          awaitingConfirmation = true;
+          reply = buildPlanSummary(mergedDraft);
+        }
+      } else if (awaitingConfirmation && isPlanConfirmation(userMessage)) {
         if (nextStep) {
           awaitingConfirmation = false;
           reply = `Perfetto, prima della conferma mi manca ancora un dato. ${getPlanQuestion(nextStep)}`;
@@ -404,6 +603,12 @@ export async function POST(request: Request) {
             status: "active",
           });
           if (insertError) {
+            const errorCode = (insertError as { code?: string }).code ?? "";
+            const errorMessage = (insertError as { message?: string }).message ?? "";
+            const isMissingTable = errorCode === "42P01" || errorMessage.toLowerCase().includes("purchase_plans");
+            if (isMissingTable) {
+              return NextResponse.json({ error: "I piani non sono ancora attivi in questo ambiente. Applica le migration Supabase e riprova." }, { status: 503 });
+            }
             return NextResponse.json({ error: "Non sono riuscito a salvare il piano. Riproviamo tra un attimo." }, { status: 500 });
           }
           if (activeDraft) {
@@ -422,33 +627,59 @@ export async function POST(request: Request) {
         return NextResponse.json({ reply, sessionId: ensuredSessionId });
       } else if (nextStep) {
         awaitingConfirmation = false;
-        reply = getPlanQuestion(nextStep);
+        if (nextStep === "title" && needsExploration(userMessage)) {
+          reply = "Perfetto, prima del titolo facciamo 1 passo utile: vuoi più stabilità, più crescita nel tempo o proteggerti da uno scenario specifico? Così impostiamo un piano coerente, senza partire subito dal ticker.";
+        } else {
+          reply = getPlanQuestion(nextStep);
+        }
       } else {
         awaitingConfirmation = true;
         reply = buildPlanSummary(mergedDraft);
       }
 
-      const nextDraftPayload = {
-        user_id: user.id,
-        session_id: ensuredSessionId,
-        title: mergedDraft.title,
-        ticker: mergedDraft.ticker,
-        cadence: mergedDraft.cadence,
-        amount: mergedDraft.amount,
-        start_date: mergedDraft.start_date,
-        monthly_budget_limit: mergedDraft.monthly_budget_limit,
-        risk_note: mergedDraft.risk_note,
-        step: nextStep ?? "confirmation",
-        awaiting_confirmation: awaitingConfirmation,
-      };
+      if (draftPersistenceAvailable) {
+        const nextDraftPayload = {
+          user_id: user.id,
+          session_id: ensuredSessionId,
+          title: mergedDraft.title,
+          ticker: mergedDraft.ticker,
+          cadence: mergedDraft.cadence,
+          amount: mergedDraft.amount,
+          start_date: mergedDraft.start_date,
+          monthly_budget_limit: mergedDraft.monthly_budget_limit,
+          risk_note: mergedDraft.risk_note,
+          step: nextStep ?? "confirmation",
+          awaiting_confirmation: awaitingConfirmation,
+        };
 
-      if (activeDraft) {
-        await supabase.from("chat_plan_drafts").update(nextDraftPayload).eq("id", activeDraft.id);
-      } else {
-        await supabase.from("chat_plan_drafts").insert(nextDraftPayload);
+        if (activeDraft) {
+          const { error: draftUpdateError } = await supabase.from("chat_plan_drafts").update(nextDraftPayload).eq("id", activeDraft.id);
+          if (draftUpdateError) {
+            const errorCode = (draftUpdateError as { code?: string }).code ?? "";
+            const errorMessage = (draftUpdateError as { message?: string }).message ?? "";
+            const isMissingTable = errorCode === "42P01" || errorMessage.toLowerCase().includes("chat_plan_drafts");
+            if (!isMissingTable) {
+              return NextResponse.json({ error: "Errore aggiornamento bozza piano." }, { status: 500 });
+            }
+          }
+        } else {
+          const { error: draftInsertError } = await supabase.from("chat_plan_drafts").insert(nextDraftPayload);
+          if (draftInsertError) {
+            const errorCode = (draftInsertError as { code?: string }).code ?? "";
+            const errorMessage = (draftInsertError as { message?: string }).message ?? "";
+            const isMissingTable = errorCode === "42P01" || errorMessage.toLowerCase().includes("chat_plan_drafts");
+            if (!isMissingTable) {
+              return NextResponse.json({ error: "Errore salvataggio bozza piano." }, { status: 500 });
+            }
+          }
+        }
       }
 
-      await saveChatExchange(reply);
+      if (isPlanStart) {
+        await saveAssistantMessage(reply, ensuredSessionId);
+      } else {
+        await saveChatExchange(reply);
+      }
       return NextResponse.json({ reply, sessionId: ensuredSessionId });
     }
 
@@ -552,11 +783,22 @@ export async function POST(request: Request) {
       plansContext = `\nPiani di acquisto attivi:\n${plansItems}\n`;
     }
 
+    const emotionalSignal = detectEmotionalSignal(userMessage);
+    const userIntent = detectUserIntent(userMessage);
+    const proactiveRadar = buildProactiveRadar(
+      portfolioContext === "Nessun asset presente."
+        ? []
+        : portfolioContext.split(",").map((item) => item.split(" ")[0]).filter(Boolean),
+      plansContext,
+    );
+    const matePolicy = formatMatePolicy(emotionalSignal, userIntent, proactiveRadar);
+
     const systemPrompt = CHAT_SYSTEM_PROMPT_TEMPLATE
       .replace("[PORTFOLIO]", portfolioContext)
       .replace("[PLANS]", plansContext)
       .replace("[MEMORY]", memoryContext)
-      .replace("[DIARY]", diaryContext);
+      .replace("[DIARY]", diaryContext)
+      .replace("[MATE_POLICY]", matePolicy);
 
     const messagesForClaude = [
       ...history.map((msg) => ({ role: msg.role, content: msg.content.trim() })),
@@ -585,7 +827,8 @@ export async function POST(request: Request) {
     }
 
     const data = (await response.json()) as { content?: Array<{ type: string; text?: string }> };
-    const reply = data.content?.find((b) => b.type === "text" && b.text)?.text?.trim() ?? "";
+    const rawReply = data.content?.find((b) => b.type === "text" && b.text)?.text?.trim() ?? "";
+    const reply = sanitizeDirectAdvice(rawReply);
     if (!reply) {
       return NextResponse.json({ error: "Claude non ha restituito una risposta valida." }, { status: 500 });
     }

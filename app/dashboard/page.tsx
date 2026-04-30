@@ -44,6 +44,7 @@ type PurchasePlanRow = {
   created_at: string;
   updated_at: string;
 };
+type PurchasePlansResponse = { data?: PurchasePlanRow[]; error?: string; warning?: "schema_missing" };
 
 const TUTORIAL_STEPS: TutorialStep[] = [
   {
@@ -311,10 +312,20 @@ export default function DashboardPage() {
   const macroRef = useRef<HTMLDivElement | null>(null);
   const newsRef = useRef<HTMLDivElement | null>(null);
   const chatRef = useRef<HTMLDivElement | null>(null);
+  const chatMessagesRef = useRef<ChatMessage[]>([{ role: "assistant", content: INITIAL_CHAT_MESSAGE }]);
+  const currentSessionIdRef = useRef<string | null>(null);
   const purchasePlansRef = useRef<HTMLDivElement | null>(null);
   const diaryButtonRef = useRef<HTMLAnchorElement | null>(null);
   const importButtonRef = useRef<HTMLButtonElement | null>(null);
   const analysisButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    chatMessagesRef.current = chatMessages;
+  }, [chatMessages]);
+
+  useEffect(() => {
+    currentSessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
 
   const scrollTo = (ref: React.RefObject<HTMLDivElement | null>) => {
     ref.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -471,7 +482,12 @@ export default function DashboardPage() {
     setPurchasePlanErrorMessage(null);
     try {
       const response = await fetch("/api/purchase-plans", { method: "GET", cache: "no-store" });
-      const payload = (await response.json()) as { data?: PurchasePlanRow[]; error?: string };
+      const payload = (await response.json()) as PurchasePlansResponse;
+      if (payload.warning === "schema_missing") {
+        // Fallback non bloccante: mostra empty state anche se migration non applicata.
+        setPurchasePlans([]);
+        return;
+      }
       if (!response.ok) throw new Error(payload.error ?? "Non sono riuscito a caricare i piani di acquisto.");
       setPurchasePlans(payload.data ?? []);
     } catch (error) {
@@ -648,7 +664,7 @@ export default function DashboardPage() {
       const portfolioIds = loadedPortfolios.map((p) => p.id);
       const loadedAssets = await loadAssets(portfolioIds);
       const [loadedNews] = await Promise.all([loadNews(), loadPrices(loadedAssets), loadMacroContext(), loadChatSessions(), loadPurchasePlans()]);
-      if (loadedNews && loadedNews.length > 0) void loadInsights(loadedNews);
+      void loadInsights(loadedNews ?? []);
 
       if (!hasTutorialAutostartChecked) {
         const tutorialCompleted = await getTutorialCompleted(user.id);
@@ -1253,25 +1269,28 @@ export default function DashboardPage() {
     finally { setIsSavingAsset(false); setIsFetchingHistoricalPrice(false); }
   };
 
-  const sendChatMessage = useCallback(async (rawInput: string) => {
+  const sendUserMessage = useCallback(async (rawInput: string, options?: { historyOverride?: ChatMessage[]; sessionIdOverride?: string | null }) => {
     const trimmedInput = rawInput.trim();
     if (!trimmedInput || isSendingChat) return;
     setChatErrorMessage(null);
     setIsSendingChat(true);
-    const historyForApi = chatMessages.filter((m) => m.content !== INITIAL_CHAT_MESSAGE || m.role !== "assistant");
+    const sourceHistory = options?.historyOverride ?? chatMessagesRef.current;
+    const historyForApi = sourceHistory.filter((m) => m.content !== INITIAL_CHAT_MESSAGE || m.role !== "assistant");
+    const sessionIdForApi = options?.sessionIdOverride !== undefined ? options.sessionIdOverride : currentSessionIdRef.current;
     setChatMessages((prev) => [...prev, { role: "user", content: trimmedInput }]);
     setChatInput("");
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: trimmedInput, history: historyForApi, sessionId: currentSessionId }),
+        body: JSON.stringify({ message: trimmedInput, history: historyForApi, sessionId: sessionIdForApi }),
       });
       const payload = (await res.json()) as { reply?: string; sessionId?: string; error?: string };
       if (!res.ok || !payload.reply) throw new Error(payload.error);
       setChatMessages((prev) => [...prev, { role: "assistant", content: payload.reply! }]);
-      if (payload.sessionId && !currentSessionId) {
+      if (payload.sessionId && !currentSessionIdRef.current) {
         setCurrentSessionId(payload.sessionId);
+        currentSessionIdRef.current = payload.sessionId;
         void loadChatSessions();
       }
       void loadPurchasePlans();
@@ -1280,11 +1299,46 @@ export default function DashboardPage() {
     } finally {
       setIsSendingChat(false);
     }
-  }, [chatMessages, currentSessionId, isSendingChat, loadChatSessions, loadPurchasePlans]);
+  }, [isSendingChat, loadChatSessions, loadPurchasePlans]);
+
+  const startPlanMode = useCallback(async () => {
+    if (isSendingChat) return;
+    setChatErrorMessage(null);
+    setIsSendingChat(true);
+    const cleanHistory: ChatMessage[] = [];
+    setChatMessages(cleanHistory);
+    chatMessagesRef.current = cleanHistory;
+    setCurrentSessionId(null);
+    currentSessionIdRef.current = null;
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "plan_start", history: cleanHistory, sessionId: null }),
+      });
+      const payload = (await res.json()) as { reply?: string; sessionId?: string; error?: string };
+      if (!res.ok || !payload.reply) throw new Error(payload.error);
+      const firstAssistantMessage: ChatMessage = { role: "assistant", content: payload.reply };
+      setChatMessages([firstAssistantMessage]);
+      chatMessagesRef.current = [firstAssistantMessage];
+      if (payload.sessionId) {
+        setCurrentSessionId(payload.sessionId);
+        currentSessionIdRef.current = payload.sessionId;
+        void loadChatSessions();
+      }
+      void loadPurchasePlans();
+    } catch (e) {
+      setChatMessages([{ role: "assistant", content: INITIAL_CHAT_MESSAGE }]);
+      chatMessagesRef.current = [{ role: "assistant", content: INITIAL_CHAT_MESSAGE }];
+      setChatErrorMessage(e instanceof Error ? e.message : "Errore chat.");
+    } finally {
+      setIsSendingChat(false);
+    }
+  }, [isSendingChat, loadChatSessions, loadPurchasePlans]);
 
   const handleSendChatMessage = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    await sendChatMessage(chatInput);
+    await sendUserMessage(chatInput);
   };
 
   const handleLoadSession = async (sessionId: string) => {
@@ -1294,24 +1348,28 @@ export default function DashboardPage() {
       if (error) throw error;
       const messages = (data ?? []) as ChatMessage[];
       setChatMessages(messages.length > 0 ? messages : [{ role: "assistant", content: INITIAL_CHAT_MESSAGE }]);
-      setCurrentSessionId(sessionId); setChatErrorMessage(null);
+      chatMessagesRef.current = messages.length > 0 ? messages : [{ role: "assistant", content: INITIAL_CHAT_MESSAGE }];
+      setCurrentSessionId(sessionId);
+      currentSessionIdRef.current = sessionId;
+      setChatErrorMessage(null);
     } catch (e) { setChatErrorMessage(e instanceof Error ? e.message : "Errore caricamento."); }
     finally { setIsLoadingSession(false); }
   };
 
   const handleNewChat = () => {
     setChatMessages([{ role: "assistant", content: INITIAL_CHAT_MESSAGE }]);
-    setCurrentSessionId(null); setChatErrorMessage(null); setIsHistoryOpen(false);
+    chatMessagesRef.current = [{ role: "assistant", content: INITIAL_CHAT_MESSAGE }];
+    setCurrentSessionId(null);
+    currentSessionIdRef.current = null;
+    setChatErrorMessage(null);
+    setIsHistoryOpen(false);
   };
 
   const openPurchasePlanChat = () => {
-    const kickoffMessage = "Creiamo il tuo nuovo piano. Ti faccio poche domande, una alla volta, e poi confermiamo insieme.";
     setIsChatMinimized(false);
     setIsChatExpanded(true);
     setIsHistoryOpen(false);
-    setChatMessages([{ role: "assistant", content: "Creiamo il tuo nuovo piano." }]);
-    setCurrentSessionId(null);
-    void sendChatMessage(kickoffMessage);
+    void startPlanMode();
     window.requestAnimationFrame(() => {
       chatInputRef.current?.focus();
     });
@@ -2032,7 +2090,11 @@ export default function DashboardPage() {
               {isLoadingSession
                 ? <div className="flex items-center justify-center py-8 text-sm text-zinc-400">Caricamento...</div>
                 : chatMessages.map((message, index) => (
-                  <div key={`${message.role}-${index}`} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
+                  <div
+                    key={`${message.role}-${index}`}
+                    data-testid={message.role === "user" ? "chat-message-user" : "chat-message-assistant"}
+                    className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
+                  >
                     <div className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-6 ${message.role === "user" ? "rounded-br-md bg-blue-600 text-white" : "rounded-bl-md bg-zinc-100 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-100"}`}>
                       {message.role === "assistant"
                         ? <div className="[&_p]:my-0 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5 [&_strong]:font-semibold"><ReactMarkdown>{message.content}</ReactMarkdown></div>

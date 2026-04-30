@@ -49,6 +49,12 @@ export async function GET() {
       .order("next_run_date", { ascending: true });
 
     if (error) {
+      const errorCode = (error as { code?: string }).code ?? "";
+      const errorMessage = (error as { message?: string }).message ?? "";
+      const isSchemaMissing = errorCode === "42P01" || errorMessage.toLowerCase().includes("purchase_plans");
+      if (isSchemaMissing) {
+        return NextResponse.json({ data: [], warning: "schema_missing" });
+      }
       return NextResponse.json({ error: "Non sono riuscito a caricare i piani di acquisto." }, { status: 500 });
     }
 
