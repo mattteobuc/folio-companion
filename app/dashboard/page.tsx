@@ -18,7 +18,7 @@ type MacroPayload = { testo: string; topics: MacroTopic[] | null; data: string }
 type ChatMessage = { role: "user" | "assistant"; content: string };
 type SymbolSearchResult = { ticker: string; name: string; market: string; asset_type: string };
 type PricesMap = Record<string, number | null>;
-type MobileTab = "portfolio" | "news" | "chat";
+type MobileTab = "portfolio" | "news";
 type ChatSession = { id: string; title: string | null; updated_at: string };
 type TutorialStep = {
   id: string;
@@ -105,19 +105,62 @@ type ImportCandidateRow = {
   sourceFile: string;
   needs_review: boolean;
   reason?: string;
+  confidence?: number;
+  uncertain_fields?: string[];
+  document_type?: "positions_with_current_price" | "transactions" | "generic_table";
 };
 type ImportOutcome = {
   imported: number;
   duplicates: number;
+  possibleDuplicatesImported: number;
   needsReview: number;
   reviewRows: ImportCandidateRow[];
+  excluded: number;
 };
+type ImportPreviewRow = ImportCandidateRow & { id: string };
 
 const MACRO_CACHE_KEY = "folio:macro-context:v2";
 const MACRO_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const NEWS_SUMMARY_CACHE_KEY = "folio:news-summaries:v1";
 const TUTORIAL_COMPLETED_LOCAL_KEY = "folio:tutorial-completed:v1";
 const INITIAL_CHAT_MESSAGE = "Ciao! Sono il tuo mate finanziario. Puoi chiedermi tutto sul tuo portafoglio, sulle notizie di mercato o sugli eventi macro. Non ti daro mai consigli diretti di acquisto o vendita, ma ti aiutero a capire meglio il contesto.";
+const IMPORT_AUTO_CONFIDENCE_THRESHOLD = 0.75;
+const IMPORT_DUPLICATE_FUZZY_THRESHOLD = 0.8;
+
+type PreviewDuplicateKind = "strict-existing" | "strict-intra" | "fuzzy-existing" | "fuzzy-intra";
+type PreviewDuplicateInfo = {
+  kind: PreviewDuplicateKind;
+  message: string;
+};
+
+function buildFallbackTicker(name: string): string {
+  const normalized = name
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 20);
+  return normalized.length > 0 ? `IMP_${normalized}` : "IMP_IMPORTED_ASSET";
+}
+
+function normalizeDedupeText(value: string | null | undefined): string {
+  return (value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function tokenOverlapScore(a: string, b: string): number {
+  const aTokens = new Set(a.split(" ").filter(Boolean));
+  const bTokens = new Set(b.split(" ").filter(Boolean));
+  if (aTokens.size === 0 || bTokens.size === 0) return 0;
+  const intersection = [...aTokens].filter((token) => bTokens.has(token)).length;
+  const union = new Set([...aTokens, ...bTokens]).size;
+  return union === 0 ? 0 : intersection / union;
+}
 
 function SentimentBadge({ sentiment }: { sentiment: string }) {
   const s = sentiment.toLowerCase();
@@ -221,7 +264,13 @@ export default function DashboardPage() {
   const [importPortfolioId, setImportPortfolioId] = useState("");
   const [importNewPortfolioName, setImportNewPortfolioName] = useState("");
   const [isImportingAssets, setIsImportingAssets] = useState(false);
+  const [isConfirmingImport, setIsConfirmingImport] = useState(false);
   const [importReport, setImportReport] = useState<ImportOutcome | null>(null);
+  const [importPreviewRows, setImportPreviewRows] = useState<ImportPreviewRow[]>([]);
+  const [selectedPreviewRowIds, setSelectedPreviewRowIds] = useState<string[]>([]);
+  const [isImportPreviewOpen, setIsImportPreviewOpen] = useState(false);
+  const [importPreviewPortfolioId, setImportPreviewPortfolioId] = useState("");
+  const [importPreviewSourcePlatform, setImportPreviewSourcePlatform] = useState("unknown");
 
   const supabase = useMemo(() => createClient(), []);
   const symbolSearchContainerRef = useRef<HTMLDivElement | null>(null);
@@ -442,7 +491,6 @@ export default function DashboardPage() {
     const prefilledMessage = `Ho letto questa notizia su ${item.ticker}: "${item.titolo}". Mi aiuti a capire in modo semplice i possibili scenari per il mio portafoglio e cosa osservare nei prossimi giorni?`;
     setIsChatMinimized(false);
     setIsChatExpanded(true);
-    setMobileTab("chat");
     setChatInput(prefilledMessage);
     window.requestAnimationFrame(() => {
       chatInputRef.current?.focus();
@@ -453,7 +501,6 @@ export default function DashboardPage() {
   const openChatFromPrompt = (prompt: string) => {
     setIsChatMinimized(false);
     setIsChatExpanded(true);
-    setMobileTab("chat");
     setChatInput(prompt);
     window.requestAnimationFrame(() => {
       chatInputRef.current?.focus();
@@ -471,7 +518,6 @@ export default function DashboardPage() {
     const boundedIndex = Math.max(0, Math.min(nextIndex, tutorialSteps.length - 1));
     const target = tutorialSteps[boundedIndex]?.target;
     if (target === "news") setMobileTab("news");
-    else if (target === "chat") setMobileTab("chat");
     else setMobileTab("portfolio");
     setTutorialStepIndex(boundedIndex);
   };
@@ -677,14 +723,22 @@ export default function DashboardPage() {
     setImportNewPortfolioName("");
   };
 
+  const closeImportPreview = () => {
+    setIsImportPreviewOpen(false);
+    setImportPreviewRows([]);
+    setSelectedPreviewRowIds([]);
+    setImportPreviewPortfolioId("");
+    setImportPreviewSourcePlatform("unknown");
+  };
+
   const openImportModal = () => {
     resetImportForm();
     setImportPortfolioId(portfolios[0]?.id ?? "");
     setIsImportModalOpen(true);
   };
 
-  const normalizeIdentifier = (value: string | null | undefined) =>
-    (value ?? "").trim().toUpperCase().replace(/\s+/g, " ");
+  const normalizeIdentifier = useCallback((value: string | null | undefined) =>
+    (value ?? "").trim().toUpperCase().replace(/\s+/g, " "), []);
 
   const parseNumberValue = (raw: string | undefined): number | null => {
     if (!raw) return null;
@@ -740,10 +794,90 @@ export default function DashboardPage() {
     });
   };
 
-  const buildDedupeKey = (row: { ticker: string | null; name: string; sourcePlatform: string; portfolioId: string }) => {
-    const tickerOrName = normalizeIdentifier(row.ticker) || normalizeIdentifier(row.name);
-    return `${tickerOrName}::${normalizeIdentifier(row.sourcePlatform)}::${row.portfolioId}`;
-  };
+  const previewDuplicateMap = useMemo(() => {
+    if (!isImportPreviewOpen || !importPreviewPortfolioId) return new Map<string, PreviewDuplicateInfo>();
+    const map = new Map<string, PreviewDuplicateInfo>();
+    const sourcePlatformNorm = normalizeIdentifier(importPreviewSourcePlatform || "unknown");
+    const existingAssets = assets.filter((asset) => asset.portfolio_id === importPreviewPortfolioId).map((asset) => ({
+      id: asset.id,
+      tickerNorm: normalizeDedupeText(asset.ticker),
+      nameNorm: normalizeDedupeText(asset.name),
+      platformNorm: normalizeIdentifier(asset.source_platform ?? "unknown"),
+    }));
+
+    const seenStrictKeys = new Set<string>();
+    const processedPreviewRows: Array<{ id: string; tickerNorm: string; nameNorm: string }> = [];
+
+    for (const row of importPreviewRows) {
+      const rowTickerNorm = normalizeDedupeText(row.ticker);
+      const rowNameNorm = normalizeDedupeText(row.name);
+      const rowBase = rowTickerNorm || rowNameNorm;
+      const strictKey = `${rowBase}::${sourcePlatformNorm}`;
+      let duplicateInfo: PreviewDuplicateInfo | null = null;
+
+      if (rowBase) {
+        for (const existing of existingAssets) {
+          const existingBase = existing.tickerNorm || existing.nameNorm;
+          if (!existingBase || existingBase !== rowBase) continue;
+          const platformCompatible =
+            existing.platformNorm === sourcePlatformNorm
+            || existing.platformNorm === "UNKNOWN"
+            || sourcePlatformNorm === "UNKNOWN";
+          if (platformCompatible) {
+            duplicateInfo = {
+              kind: "strict-existing",
+              message: "Gia presente nel portafoglio.",
+            };
+            break;
+          }
+        }
+      }
+
+      if (!duplicateInfo && seenStrictKeys.has(strictKey) && rowBase) {
+        duplicateInfo = {
+          kind: "strict-intra",
+          message: "Duplicato nella selezione corrente.",
+        };
+      }
+      if (rowBase) seenStrictKeys.add(strictKey);
+
+      if (!duplicateInfo) {
+        const canUseFuzzy = rowNameNorm.length > 0;
+        if (canUseFuzzy) {
+          for (const existing of existingAssets) {
+            if (!existing.nameNorm) continue;
+            if (rowTickerNorm && existing.tickerNorm && rowTickerNorm !== existing.tickerNorm) continue;
+            const score = tokenOverlapScore(rowNameNorm, existing.nameNorm);
+            if (score >= IMPORT_DUPLICATE_FUZZY_THRESHOLD) {
+              duplicateInfo = {
+                kind: "fuzzy-existing",
+                message: "Verifica: titolo molto simile a uno gia presente.",
+              };
+              break;
+            }
+          }
+          if (!duplicateInfo) {
+            for (const processed of processedPreviewRows) {
+              if (!processed.nameNorm) continue;
+              if (rowTickerNorm && processed.tickerNorm && rowTickerNorm !== processed.tickerNorm) continue;
+              const score = tokenOverlapScore(rowNameNorm, processed.nameNorm);
+              if (score >= IMPORT_DUPLICATE_FUZZY_THRESHOLD) {
+                duplicateInfo = {
+                  kind: "fuzzy-intra",
+                  message: "Verifica: titolo molto simile a un'altra riga selezionata.",
+                };
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      if (duplicateInfo) map.set(row.id, duplicateInfo);
+      processedPreviewRows.push({ id: row.id, tickerNorm: rowTickerNorm, nameNorm: rowNameNorm });
+    }
+    return map;
+  }, [assets, importPreviewPortfolioId, importPreviewRows, importPreviewSourcePlatform, isImportPreviewOpen, normalizeIdentifier]);
 
   const askMateForReviewRows = (rows: ImportCandidateRow[]) => {
     if (rows.length === 0) return;
@@ -789,7 +923,9 @@ export default function DashboardPage() {
         screenshotFiles.forEach((file) => formData.append("files", file));
         const screenshotRes = await fetch("/api/import-screenshot", { method: "POST", body: formData });
         const screenshotPayload = (await screenshotRes.json()) as { rows?: ImportCandidateRow[]; error?: string };
-        if (!screenshotRes.ok) throw new Error(screenshotPayload.error ?? "Errore elaborazione screenshot.");
+        if (!screenshotRes.ok) {
+          throw new Error(screenshotPayload.error ?? "Non sono riuscito ad analizzare gli screenshot. Riprova con immagini piu nitide o inquadra meno righe per schermata.");
+        }
         screenshotRows = screenshotPayload.rows ?? [];
       }
 
@@ -798,19 +934,55 @@ export default function DashboardPage() {
         setErrorMessage("Non ho trovato righe importabili nei file caricati.");
         return;
       }
-
-      const existingAssets = assets.filter((asset) => asset.portfolio_id === targetPortfolioId);
-      const existingKeys = new Set(
-        existingAssets.map((asset) =>
-          buildDedupeKey({
-            ticker: asset.ticker,
-            name: asset.name,
-            sourcePlatform: asset.source_platform ?? "unknown",
-            portfolioId: targetPortfolioId,
-          }),
-        ),
+      const previewRows: ImportPreviewRow[] = allRows.map((row, index) => ({
+        ...row,
+        id: `${row.sourceFile}-${index}-${crypto.randomUUID()}`,
+      }));
+      setImportPreviewRows(previewRows);
+      setSelectedPreviewRowIds(previewRows.map((row) => row.id));
+      setImportPreviewPortfolioId(targetPortfolioId);
+      setImportPreviewSourcePlatform(sourcePlatform);
+      setIsImportModalOpen(false);
+      setIsImportPreviewOpen(true);
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Import non completato: il database non è ancora allineato. Applica le migration e riprova.",
       );
-      const batchKeys = new Set<string>();
+    } finally {
+      setIsImportingAssets(false);
+    }
+  };
+
+  const togglePreviewRowSelection = (rowId: string) => {
+    setSelectedPreviewRowIds((prev) =>
+      prev.includes(rowId) ? prev.filter((id) => id !== rowId) : [...prev, rowId]);
+  };
+
+  const removePreviewRow = (rowId: string) => {
+    setImportPreviewRows((prev) => prev.filter((row) => row.id !== rowId));
+    setSelectedPreviewRowIds((prev) => prev.filter((id) => id !== rowId));
+  };
+
+  const updatePreviewRow = (rowId: string, patch: Partial<ImportPreviewRow>) => {
+    setImportPreviewRows((prev) => prev.map((row) => (row.id === rowId ? { ...row, ...patch } : row)));
+  };
+
+  const handleConfirmImportPreview = async () => {
+    setErrorMessage(null);
+    if (!importPreviewPortfolioId) {
+      setErrorMessage("Seleziona un portafoglio di destinazione.");
+      return;
+    }
+    const selectedRows = importPreviewRows.filter((row) => selectedPreviewRowIds.includes(row.id));
+    if (selectedRows.length === 0) {
+      setErrorMessage("Seleziona almeno una riga da importare.");
+      return;
+    }
+
+    setIsConfirmingImport(true);
+    try {
       const reviewRows: ImportCandidateRow[] = [];
       const rowsToInsert: Array<{
         portfolio_id: string;
@@ -824,71 +996,119 @@ export default function DashboardPage() {
         external_symbol: string | null;
         import_batch_id: string;
       }> = [];
-
+      const legacyRowsToInsert: Array<{
+        portfolio_id: string;
+        ticker: string;
+        name: string;
+        asset_type: string;
+        quantity: number;
+        purchase_price: number;
+        purchase_date: string;
+      }> = [];
       let duplicates = 0;
+      let possibleDuplicatesImported = 0;
       const importBatchId = crypto.randomUUID();
-      for (const row of allRows) {
-        const dedupeKey = buildDedupeKey({
-          ticker: row.ticker,
-          name: row.name,
-          sourcePlatform,
-          portfolioId: targetPortfolioId,
-        });
-        if (existingKeys.has(dedupeKey) || batchKeys.has(dedupeKey)) {
+
+      for (const row of selectedRows) {
+        const duplicateInfo = previewDuplicateMap.get(row.id);
+        if (duplicateInfo && duplicateInfo.kind.startsWith("strict")) {
           duplicates += 1;
           continue;
         }
-        batchKeys.add(dedupeKey);
-
-        const hasRequiredFields = Boolean(row.name?.trim()) && Boolean(row.ticker) && row.quantity != null && row.purchase_price != null;
-        if (row.needs_review || !hasRequiredFields) {
+        const parsedQuantity = typeof row.quantity === "number" ? row.quantity : null;
+        const parsedPurchasePrice = typeof row.purchase_price === "number" ? row.purchase_price : null;
+        const isValid = Boolean(row.name?.trim()) && parsedQuantity != null && parsedQuantity > 0 && parsedPurchasePrice != null && parsedPurchasePrice > 0;
+        const confidence = typeof row.confidence === "number" ? row.confidence : 0;
+        const lowConfidence = confidence > 0 && confidence < IMPORT_AUTO_CONFIDENCE_THRESHOLD;
+        if (row.needs_review || !isValid || lowConfidence) {
           reviewRows.push({
             ...row,
-            needs_review: true,
-            reason: row.reason ?? "Dati non chiari: conferma manuale richiesta.",
+            reason: row.reason ?? "Riga da rivedere prima della conferma.",
           });
           continue;
         }
 
+        const normalizedTicker = row.ticker ? normalizeIdentifier(row.ticker) : buildFallbackTicker(row.name);
+        const normalizedName = row.name.trim();
+        const normalizedQuantity = Number(parsedQuantity.toFixed(6));
+        const normalizedPurchasePrice = Number(parsedPurchasePrice.toFixed(6));
+        const normalizedPurchaseDate = row.purchase_date ?? new Date().toISOString().slice(0, 10);
+
         rowsToInsert.push({
-          portfolio_id: targetPortfolioId,
-          ticker: normalizeIdentifier(row.ticker),
-          name: row.name.trim(),
+          portfolio_id: importPreviewPortfolioId,
+          ticker: normalizedTicker,
+          name: normalizedName,
           asset_type: "imported",
-          quantity: Number(row.quantity!.toFixed(6)),
-          purchase_price: Number(row.purchase_price!.toFixed(6)),
-          purchase_date: row.purchase_date ?? new Date().toISOString().slice(0, 10),
-          source_platform: sourcePlatform,
+          quantity: normalizedQuantity,
+          purchase_price: normalizedPurchasePrice,
+          purchase_date: normalizedPurchaseDate,
+          source_platform: importPreviewSourcePlatform,
           external_symbol: row.ticker,
           import_batch_id: importBatchId,
+        });
+        if (duplicateInfo?.kind.startsWith("fuzzy")) {
+          possibleDuplicatesImported += 1;
+        }
+        legacyRowsToInsert.push({
+          portfolio_id: importPreviewPortfolioId,
+          ticker: normalizedTicker,
+          name: normalizedName,
+          asset_type: "imported",
+          quantity: normalizedQuantity,
+          purchase_price: normalizedPurchasePrice,
+          purchase_date: normalizedPurchaseDate,
         });
       }
 
       if (rowsToInsert.length > 0) {
         const { error } = await supabase.from("assets").insert(rowsToInsert);
-        if (error) throw error;
+        if (error) {
+          const message = error.message.toLowerCase();
+          const details = (error.details ?? "").toLowerCase();
+          const isSchemaCompatibilityError =
+            message.includes("pgrst204")
+            || message.includes("column")
+            || message.includes("source_platform")
+            || message.includes("external_symbol")
+            || message.includes("import_batch_id")
+            || details.includes("column")
+            || details.includes("source_platform")
+            || details.includes("external_symbol")
+            || details.includes("import_batch_id");
+
+          if (!isSchemaCompatibilityError) throw error;
+          console.info("[import] fallback insert legacy attivato");
+          const { error: legacyError } = await supabase.from("assets").insert(legacyRowsToInsert);
+          if (legacyError) throw new Error("Import non completato: il database non è ancora allineato. Applica le migration e riprova.");
+        } else {
+          console.info("[import] insert schema nuovo ok");
+        }
       }
 
-      const portfolioIdsForReload = importDestinationType === "new"
-        ? [...new Set([...portfolios.map((p) => p.id), targetPortfolioId])]
-        : portfolios.map((p) => p.id);
-      const updatedAssets = await loadAssets(portfolioIdsForReload);
+      const updatedAssets = await loadAssets(portfolios.map((p) => p.id));
       await loadPrices(updatedAssets);
       await loadNews();
 
+      const excluded = importPreviewRows.length - selectedRows.length;
       setImportReport({
         imported: rowsToInsert.length,
         duplicates,
+        possibleDuplicatesImported,
         needsReview: reviewRows.length,
         reviewRows,
+        excluded,
       });
-      setIsImportModalOpen(false);
+      closeImportPreview();
       resetImportForm();
       if (reviewRows.length > 0) askMateForReviewRows(reviewRows);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Errore importazione.");
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Import non completato: il database non è ancora allineato. Applica le migration e riprova.",
+      );
     } finally {
-      setIsImportingAssets(false);
+      setIsConfirmingImport(false);
     }
   };
 
@@ -1127,9 +1347,9 @@ export default function DashboardPage() {
                     );
                   })}
                 </div>
-                <div className="flex items-center justify-between border-t border-zinc-100 bg-zinc-50/80 px-4 py-3 dark:border-zinc-800 dark:bg-zinc-800/30">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 bg-zinc-50/80 px-4 py-3 dark:border-zinc-800 dark:bg-zinc-800/30">
                   <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400">Totale {portfolio.name}</span>
-                  <div className="flex items-center gap-4 text-sm">
+                  <div className="flex flex-wrap items-center justify-end gap-3 text-sm">
                     <span className="text-zinc-500">Investito {formatCurrency(totals.totalCost)}</span>
                     {totals.totalValue > 0 && <>
                       <span className="font-semibold text-zinc-700 dark:text-zinc-200">{formatCurrency(totals.totalValue)}</span>
@@ -1163,7 +1383,7 @@ export default function DashboardPage() {
             </button>
           )}
           <button type="button" onClick={() => openAddAssetModal(activePortfolioFilter !== "all" ? activePortfolioFilter : undefined)}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500">
+            className="inline-flex min-h-11 items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500">
             <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
             Aggiungi
           </button>
@@ -1171,7 +1391,7 @@ export default function DashboardPage() {
             type="button"
             ref={importButtonRef}
             onClick={openImportModal}
-            className={`inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 ${getTutorialTargetClass("import")}`}
+            className={`inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 ${getTutorialTargetClass("import")}`}
           >
             Importa con Mate
           </button>
@@ -1179,7 +1399,7 @@ export default function DashboardPage() {
             ref={analysisButtonRef}
             type="button"
             onClick={() => router.push("/dashboard/analisi")}
-            className={`inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 ${getTutorialTargetClass("analysis")}`}
+            className={`inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 ${getTutorialTargetClass("analysis")}`}
           >
             Apri analisi
           </button>
@@ -1255,10 +1475,30 @@ export default function DashboardPage() {
       {errorMessage && <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{errorMessage}</p>}
       {importReport && (
         <div className="mb-4 rounded-xl border border-blue-200 bg-blue-50 p-4 dark:border-blue-900/40 dark:bg-blue-950/20">
-          <h3 className="text-sm font-semibold text-blue-800 dark:text-blue-300">Report importazione guidata dal Mate</h3>
+          <div className="flex items-start justify-between gap-3">
+            <h3 className="text-sm font-semibold text-blue-800 dark:text-blue-300">Report importazione guidata dal Mate</h3>
+            <button
+              type="button"
+              onClick={() => setImportReport(null)}
+              className="rounded-md border border-blue-200 bg-white px-2 py-1 text-xs font-medium text-blue-700 transition hover:bg-blue-100 dark:border-blue-900/40 dark:bg-zinc-900 dark:text-blue-300 dark:hover:bg-blue-900/20"
+              aria-label="Chiudi report importazione"
+            >
+              Chiudi
+            </button>
+          </div>
           <p className="mt-1 text-sm text-blue-700 dark:text-blue-300">
-            Importati: {importReport.imported} · Duplicati ignorati: {importReport.duplicates} · Righe da rivedere: {importReport.needsReview}
+            Importati: {importReport.imported} · Duplicati ignorati: {importReport.duplicates} · Possibili duplicati importati: {importReport.possibleDuplicatesImported} · Righe da rivedere: {importReport.needsReview} · Escluse: {importReport.excluded}
           </p>
+          {importReport.imported === 0 && importReport.needsReview > 0 && (
+            <p className="mt-2 rounded-lg border border-blue-200 bg-white/80 px-3 py-2 text-xs text-blue-800 dark:border-blue-900/40 dark:bg-zinc-900/70 dark:text-blue-300">
+              Import completato: servono conferme manuali, nessun asset aggiunto automaticamente.
+            </p>
+          )}
+          {importReport.imported === 0 && importReport.duplicates > 0 && (
+            <p className="mt-2 rounded-lg border border-blue-200 bg-white/80 px-3 py-2 text-xs text-blue-800 dark:border-blue-900/40 dark:bg-zinc-900/70 dark:text-blue-300">
+              Nessuna nuova riga importata: le selezionate risultano gia presenti.
+            </p>
+          )}
           {importReport.reviewRows.length > 0 && (
             <div className="mt-3 space-y-2">
               <p className="text-xs font-medium uppercase tracking-wider text-blue-700/80 dark:text-blue-300/80">Rivedi righe non chiare</p>
@@ -1487,7 +1727,7 @@ export default function DashboardPage() {
     <div ref={chatRef} className={`flex flex-col gap-4 ${currentTutorialTarget === "chat" ? "rounded-xl ring-2 ring-blue-400 ring-offset-2 ring-offset-zinc-50 dark:ring-offset-zinc-950" : ""}`}>
 
       <div
-        className={`fixed ${isTutorialOpen && currentTutorialTarget === "chat" ? "z-[65]" : "z-50"} flex flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg dark:border-zinc-800 dark:bg-zinc-900 ${isChatExpanded ? "inset-4 shadow-2xl" : "bottom-20 left-2 right-2 h-[58vh] max-h-[620px] sm:bottom-4 sm:left-auto sm:right-4 sm:h-[560px] sm:w-[420px]"}`}
+        className={`fixed ${isTutorialOpen && currentTutorialTarget === "chat" ? "z-[65]" : "z-50"} flex flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg dark:border-zinc-800 dark:bg-zinc-900 ${isChatExpanded ? "inset-4 shadow-2xl" : "bottom-[calc(5rem+env(safe-area-inset-bottom))] left-2 right-2 h-[58vh] max-h-[620px] sm:bottom-4 sm:left-auto sm:right-4 sm:h-[560px] sm:w-[420px]"}`}
       >
         <div className="flex items-center justify-between gap-2 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
           <div className="flex min-w-0 items-center gap-2">
@@ -1571,7 +1811,7 @@ export default function DashboardPage() {
               )}
               <div ref={chatBottomRef} />
             </div>
-            <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
+            <div className="border-t border-zinc-200 p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] dark:border-zinc-800">
               {chatErrorMessage && <p className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{chatErrorMessage}</p>}
               <button
                 type="button"
@@ -1600,13 +1840,147 @@ export default function DashboardPage() {
     <button
       type="button"
       onClick={handleRestoreChat}
-      className="fixed bottom-24 right-3 z-50 inline-flex items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-lg transition hover:bg-blue-500 sm:bottom-4 sm:right-4"
+      className="fixed bottom-[calc(5.5rem+env(safe-area-inset-bottom))] right-3 z-50 inline-flex items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-lg transition hover:bg-blue-500 sm:bottom-4 sm:right-4"
       aria-label="Apri il mate"
     >
       <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 01.865-.501 48.172 48.172 0 003.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" /></svg>
       Mate
     </button>
   );
+
+  const importPreviewSummary = useMemo(() => {
+    const selectedRows = importPreviewRows.filter((row) => selectedPreviewRowIds.includes(row.id));
+    const strictDuplicates = selectedRows.filter((row) => previewDuplicateMap.get(row.id)?.kind.startsWith("strict")).length;
+    const possibleDuplicates = selectedRows.filter((row) => previewDuplicateMap.get(row.id)?.kind.startsWith("fuzzy")).length;
+    const needsReview = selectedRows.filter((row) => row.needs_review).length;
+    const ready = selectedRows.length - strictDuplicates - needsReview;
+    return {
+      extracted: importPreviewRows.length,
+      selected: selectedRows.length,
+      strictDuplicates,
+      possibleDuplicates,
+      needsReview,
+      ready: Math.max(0, ready),
+    };
+  }, [importPreviewRows, previewDuplicateMap, selectedPreviewRowIds]);
+
+  const ImportPreviewModal = isImportPreviewOpen ? (
+    <div className="fixed inset-0 z-[72] flex items-end justify-center bg-zinc-950/60 sm:items-center">
+      <div className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-t-2xl border border-zinc-200 bg-white shadow-2xl sm:rounded-2xl dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="flex items-start justify-between gap-4 border-b border-zinc-200 p-4 dark:border-zinc-800">
+          <div>
+            <h2 className="text-lg font-semibold">Anteprima importazione</h2>
+            <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+              Rivedi le righe prima di confermare: i dati verranno salvati solo dopo conferma.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={closeImportPreview}
+            className="rounded-md p-1 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800"
+            aria-label="Chiudi anteprima importazione"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="grid gap-2 border-b border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-600 sm:grid-cols-6 dark:border-zinc-800 dark:bg-zinc-950/50 dark:text-zinc-300">
+          <span>Estratte: <strong>{importPreviewSummary.extracted}</strong></span>
+          <span>Selezionate: <strong>{importPreviewSummary.selected}</strong></span>
+          <span>Duplicate: <strong>{importPreviewSummary.strictDuplicates}</strong></span>
+          <span>Possibili dup.: <strong>{importPreviewSummary.possibleDuplicates}</strong></span>
+          <span>Da rivedere: <strong>{importPreviewSummary.needsReview}</strong></span>
+          <span>Pronte: <strong>{importPreviewSummary.ready}</strong></span>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 border-b border-zinc-200 p-3 dark:border-zinc-800">
+          <button type="button" onClick={() => setSelectedPreviewRowIds(importPreviewRows.map((row) => row.id))} className="rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 dark:border-zinc-700 dark:text-zinc-200">
+            Seleziona tutto
+          </button>
+          <button type="button" onClick={() => setSelectedPreviewRowIds([])} className="rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 dark:border-zinc-700 dark:text-zinc-200">
+            Deseleziona tutto
+          </button>
+        </div>
+        <div className="max-h-[52vh] overflow-auto">
+          <table className="min-w-full text-sm">
+            <thead className="sticky top-0 bg-white text-left text-xs uppercase tracking-wide text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
+              <tr>
+                <th className="px-3 py-2">Includi</th>
+                <th className="px-3 py-2">Nome</th>
+                <th className="px-3 py-2">Ticker</th>
+                <th className="px-3 py-2">Quantita</th>
+                <th className="px-3 py-2">Prezzo acquisto</th>
+                <th className="px-3 py-2">Data</th>
+                <th className="px-3 py-2">Stato</th>
+                <th className="px-3 py-2">Azioni</th>
+              </tr>
+            </thead>
+            <tbody>
+              {importPreviewRows.map((row) => {
+                const isSelected = selectedPreviewRowIds.includes(row.id);
+                const duplicateInfo = previewDuplicateMap.get(row.id);
+                const statusLabel = duplicateInfo
+                  ? duplicateInfo.kind.startsWith("strict")
+                    ? "Duplicato"
+                    : "Possibile duplicato"
+                  : row.needs_review
+                    ? "Da rivedere"
+                    : "OK";
+                return (
+                  <tr key={row.id} className="border-t border-zinc-100 dark:border-zinc-800">
+                    <td className="px-3 py-2 align-top">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => togglePreviewRowSelection(row.id)}
+                        aria-label={`Includi ${row.name}`}
+                      />
+                    </td>
+                    <td className="px-3 py-2 align-top">
+                      <p className="font-medium">{row.name}</p>
+                      {row.reason && <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{row.reason}</p>}
+                    </td>
+                    <td className="px-3 py-2 align-top">
+                      <input value={row.ticker ?? ""} onChange={(e) => updatePreviewRow(row.id, { ticker: e.target.value || null })} className="w-24 rounded-md border border-zinc-300 px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-950" />
+                    </td>
+                    <td className="px-3 py-2 align-top">
+                      <input type="number" step="any" value={row.quantity ?? ""} onChange={(e) => updatePreviewRow(row.id, { quantity: e.target.value ? Number(e.target.value) : null })} className="w-24 rounded-md border border-zinc-300 px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-950" />
+                    </td>
+                    <td className="px-3 py-2 align-top">
+                      <input type="number" step="any" value={row.purchase_price ?? ""} onChange={(e) => updatePreviewRow(row.id, { purchase_price: e.target.value ? Number(e.target.value) : null })} className="w-28 rounded-md border border-zinc-300 px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-950" />
+                    </td>
+                    <td className="px-3 py-2 align-top">
+                      <input type="date" value={row.purchase_date ?? ""} onChange={(e) => updatePreviewRow(row.id, { purchase_date: e.target.value || null })} className="w-36 rounded-md border border-zinc-300 px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-950" />
+                    </td>
+                    <td className="px-3 py-2 align-top">
+                      <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${statusLabel === "OK" ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300" : statusLabel === "Duplicato" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300" : statusLabel === "Possibile duplicato" ? "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300" : "bg-zinc-200 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-200"}`}>
+                        {statusLabel}
+                      </span>
+                      {duplicateInfo && <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">{duplicateInfo.message}</p>}
+                      {typeof row.confidence === "number" && (
+                        <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">Conf: {row.confidence.toFixed(2)}</p>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 align-top">
+                      <button type="button" onClick={() => removePreviewRow(row.id)} className="rounded-md border border-red-300 px-2 py-1 text-xs text-red-700 dark:border-red-900/40 dark:text-red-300">
+                        Elimina
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div className="flex items-center justify-end gap-3 border-t border-zinc-200 p-4 dark:border-zinc-800">
+          <button type="button" onClick={closeImportPreview} className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 dark:border-zinc-700 dark:text-zinc-200">
+            Annulla
+          </button>
+          <button type="button" onClick={() => void handleConfirmImportPreview()} disabled={isConfirmingImport} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60">
+            {isConfirmingImport ? "Conferma in corso..." : "Conferma importazione"}
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
 
   const ImportAssetsModal = isImportModalOpen ? (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-zinc-950/50 sm:items-center">
@@ -1702,12 +2076,12 @@ export default function DashboardPage() {
   // ── ADD ASSET MODAL ───────────────────────────────────────────
   const AddAssetModal = isAddAssetModalOpen ? (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-zinc-950/50 sm:items-center">
-      <div className="w-full max-w-md rounded-t-2xl border border-zinc-200 bg-white p-6 shadow-xl sm:rounded-2xl dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="flex max-h-[92vh] w-full max-w-md flex-col overflow-hidden rounded-t-2xl border border-zinc-200 bg-white p-4 shadow-xl sm:max-h-[88vh] sm:rounded-2xl sm:p-6 dark:border-zinc-800 dark:bg-zinc-900">
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-lg font-semibold">Aggiungi asset</h2>
           <button type="button" onClick={() => { setIsAddAssetModalOpen(false); resetAssetForm(); }} className="rounded-md p-1 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700">✕</button>
         </div>
-        <form onSubmit={handleAddAsset} className="space-y-4">
+        <form onSubmit={handleAddAsset} className="space-y-4 overflow-y-auto pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
           <div>
             <label className="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Cerca ticker o azienda</label>
             <div className="relative" ref={symbolSearchContainerRef}>
@@ -1738,7 +2112,7 @@ export default function DashboardPage() {
                 <select value={selectedPortfolioId} onChange={(e) => setSelectedPortfolioId(e.target.value)} className="flex-1 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-200 dark:border-zinc-700 dark:bg-zinc-950">
                   {portfolios.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
-                <button type="button" onClick={() => setShowNewPortfolioInput(true)} className="whitespace-nowrap rounded-lg border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-600 hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:text-zinc-300">+ Nuovo</button>
+                <button type="button" onClick={() => setShowNewPortfolioInput(true)} className="min-h-11 whitespace-nowrap rounded-lg border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-600 hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:text-zinc-300">+ Nuovo</button>
               </div>
             ) : (
               <div className="flex items-center gap-2">
@@ -1757,9 +2131,9 @@ export default function DashboardPage() {
           </div>
           {historicalPriceError && <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">⚠ {historicalPriceError}</p>}
           {errorMessage && <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{errorMessage}</p>}
-          <div className="flex items-center justify-end gap-3 pt-2">
-            <button type="button" onClick={() => { setIsAddAssetModalOpen(false); resetAssetForm(); }} className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800">Annulla</button>
-            <button type="submit" disabled={isSavingAsset || isFetchingHistoricalPrice || !selectedAsset || !investedAmount || !purchaseDate} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-70">
+          <div className="sticky bottom-0 flex items-center justify-end gap-3 border-t border-zinc-100 bg-white pt-3 dark:border-zinc-800 dark:bg-zinc-900">
+            <button type="button" onClick={() => { setIsAddAssetModalOpen(false); resetAssetForm(); }} className="min-h-11 rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800">Annulla</button>
+            <button type="submit" disabled={isSavingAsset || isFetchingHistoricalPrice || !selectedAsset || !investedAmount || !purchaseDate} className="min-h-11 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-70">
               {isFetchingHistoricalPrice ? "Recupero prezzo..." : isSavingAsset ? "Salvataggio..." : "Salva asset"}
             </button>
           </div>
@@ -1774,10 +2148,10 @@ export default function DashboardPage() {
 
       {/* ── HEADER con nav centrale ── */}
       <header className="sticky top-0 z-30 border-b border-zinc-200 bg-white/90 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/90">
-        <div className="mx-auto flex w-full max-w-6xl items-center px-4 py-3 sm:px-6 lg:px-8">
+        <div className="mx-auto flex w-full max-w-6xl items-center gap-2 px-4 py-3 sm:px-6 lg:px-8">
 
           {/* Logo — fisso a sinistra */}
-          <p className="w-40 flex-shrink-0 text-base font-semibold tracking-tight text-blue-700 dark:text-blue-400">
+          <p className="min-w-0 flex-1 text-base font-semibold tracking-tight text-blue-700 dark:text-blue-400 lg:w-40 lg:flex-none">
             Folio Mate
           </p>
 
@@ -1798,7 +2172,7 @@ export default function DashboardPage() {
           </nav>
 
           {/* Azioni destra */}
-          <div className="flex w-40 flex-shrink-0 items-center justify-end gap-2">
+          <div className="flex flex-shrink-0 items-center justify-end gap-2">
             <a
               ref={diaryButtonRef}
               href="/checkin"
@@ -1815,7 +2189,7 @@ export default function DashboardPage() {
             </button>
             <span className="hidden text-sm text-zinc-500 dark:text-zinc-400 lg:inline">{userEmail}</span>
             <button type="button" onClick={handleLogout} disabled={isLoggingOut}
-              className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
+              className="min-h-11 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
               {isLoggingOut ? "..." : "Logout"}
             </button>
           </div>
@@ -1824,41 +2198,29 @@ export default function DashboardPage() {
 
       {/* Mobile */}
       <div className="lg:hidden">
-        <div className="px-4 py-6 pb-24">
+        <div className="px-4 py-6 pb-28">
           {mobileTab === "portfolio" && (
             <div className="space-y-6">
               {InsightsSection}
               {SignalsSection}
-              {/* Anchor menu mobile — solo nella tab portafoglio */}
-              <div className="flex items-center gap-2 overflow-x-auto pb-1">
-                <button type="button" onClick={() => scrollTo(portfolioRef)} className="flex-shrink-0 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-900">📊 Portafoglio</button>
-                <button type="button" onClick={() => scrollTo(macroRef)} className="flex-shrink-0 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-900">🌍 Mercato</button>
-                <button type="button" onClick={() => scrollTo(newsRef)} className="flex-shrink-0 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-900">📰 Notizie</button>
-              </div>
               {PortfolioSection}
               {MacroSection}
               {NewsSection}
             </div>
           )}
           {mobileTab === "news" && NewsSection}
-          {mobileTab === "chat" && (
-            <div className="rounded-xl border border-zinc-200 bg-white p-4 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
-              Il Mate e sempre visibile in sovraimpressione.
-            </div>
-          )}
         </div>
-        <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-zinc-200 bg-white/95 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/95">
+        <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-zinc-200 bg-white/95 pb-[env(safe-area-inset-bottom)] backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/95">
           <div className="flex">
-            {(["portfolio", "news", "chat"] as MobileTab[]).map((tab) => {
+            {(["portfolio", "news"] as MobileTab[]).map((tab) => {
               const icons: Record<MobileTab, React.ReactNode> = {
                 portfolio: <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />,
                 news: <path strokeLinecap="round" strokeLinejoin="round" d="M12 7.5h1.5m-1.5 3h1.5m-7.5 3h7.5m-7.5 3h7.5m3-9h3.375c.621 0 1.125.504 1.125 1.125V18a2.25 2.25 0 01-2.25 2.25M16.5 7.5V18a2.25 2.25 0 002.25 2.25M16.5 7.5V4.875c0-.621-.504-1.125-1.125-1.125H4.125C3.504 3.75 3 4.254 3 4.875V18a2.25 2.25 0 002.25 2.25h13.5M6 7.5h3v3H6v-3z" />,
-                chat: <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 01.865-.501 48.172 48.172 0 003.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" />,
               };
-              const labels: Record<MobileTab, string> = { portfolio: "Portafoglio", news: "Notizie", chat: "Mate" };
+              const labels: Record<MobileTab, string> = { portfolio: "Portafoglio", news: "Notizie" };
               return (
                 <button key={tab} type="button" onClick={() => setMobileTab(tab)}
-                  className={`flex flex-1 flex-col items-center gap-1 py-3 text-xs font-medium transition ${mobileTab === tab ? "text-blue-600 dark:text-blue-400" : "text-zinc-500 dark:text-zinc-400"}`}>
+                  className={`flex min-h-11 flex-1 flex-col items-center justify-center gap-1 py-2 text-xs font-medium transition ${mobileTab === tab ? "text-blue-600 dark:text-blue-400" : "text-zinc-500 dark:text-zinc-400"}`}>
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>{icons[tab]}</svg>
                   {labels[tab]}
                 </button>
@@ -1939,6 +2301,7 @@ export default function DashboardPage() {
       )}
 
       {ImportAssetsModal}
+      {ImportPreviewModal}
       {AddAssetModal}
     </main>
   );

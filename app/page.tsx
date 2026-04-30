@@ -8,7 +8,7 @@ export default function Home() {
               Folio Mate
             </p>
             <h1 className="text-4xl font-semibold leading-tight tracking-tight sm:text-5xl">
-              Il tuo compagno nelle decisioni di portafoglio.
+              Il tuo mate nelle decisioni di portafoglio.
             </h1>
             <p className="text-base leading-7 text-zinc-600 dark:text-zinc-300 sm:text-lg">
               Folio Mate ti affianca ogni giorno con segnali contestualizzati, notizie spiegate in modo semplice e un diario personale per restare coerente con il tuo metodo.

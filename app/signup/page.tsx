@@ -40,10 +40,18 @@ export default function SignupPage() {
       if (error) {
         const normalizedMessage = error.message.toLowerCase();
         if (normalizedMessage.includes("rate limit")) {
-          setErrorMessage("Troppi tentativi ravvicinati. Riprova tra qualche minuto.");
+          setErrorMessage("Troppi tentativi ravvicinati. Attendi 1-2 minuti e riprova, oppure usa un'altra email.");
           return;
         }
-        setErrorMessage(error.message);
+        if (normalizedMessage.includes("already registered") || normalizedMessage.includes("already been registered")) {
+          setErrorMessage("Questa email risulta gia registrata. Prova ad accedere o usa il recupero password.");
+          return;
+        }
+        if (normalizedMessage.includes("invalid email")) {
+          setErrorMessage("L'indirizzo email non sembra valido. Controllalo e riprova.");
+          return;
+        }
+        setErrorMessage("Non sono riuscito a completare la registrazione. Riprova tra poco.");
         return;
       }
 
@@ -53,7 +61,7 @@ export default function SignupPage() {
         return;
       }
 
-      setSuccessMessage("Ti abbiamo inviato un link di conferma via email. Aprilo per completare l'accesso.");
+      setSuccessMessage("Ti abbiamo inviato un link di conferma via email. Aprilo dallo stesso dispositivo per completare l'accesso.");
     } catch (error) {
       setErrorMessage(
         error instanceof Error ? error.message : "Errore inatteso durante la registrazione.",
@@ -69,6 +77,9 @@ export default function SignupPage() {
         <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-100">Registrati</h1>
         <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
           Crea il tuo account Folio Mate.
+        </p>
+        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+          Dopo la registrazione riceverai una mail di conferma: se non la trovi, controlla anche spam o promozioni.
         </p>
 
         <form onSubmit={handleSignup} className="mt-6 space-y-4">
