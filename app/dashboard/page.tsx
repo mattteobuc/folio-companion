@@ -24,7 +24,25 @@ type TutorialStep = {
   id: string;
   title: string;
   description: string;
-  target: "portfolio" | "insights" | "signals" | "macro" | "news" | "chat" | "import" | "analysis" | "diary";
+  target: "portfolio" | "insights" | "signals" | "macro" | "news" | "chat" | "import" | "analysis" | "diary" | "purchasePlans";
+};
+
+type PurchasePlanCadence = "settimanale" | "quindicinale" | "mensile";
+type PurchasePlanStatus = "active" | "paused" | "archived";
+type PurchasePlanRow = {
+  id: string;
+  title: string;
+  ticker: string | null;
+  goal_type: "accumulo" | "bilanciamento" | "riduzione_volatilita" | "altro";
+  cadence: PurchasePlanCadence;
+  amount: number;
+  start_date: string;
+  next_run_date: string;
+  monthly_budget_limit: number | null;
+  status: PurchasePlanStatus;
+  risk_note: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 const TUTORIAL_STEPS: TutorialStep[] = [
@@ -63,6 +81,12 @@ const TUTORIAL_STEPS: TutorialStep[] = [
     title: "Analisi dedicata",
     description: "Qui trovi il pulsante per aprire l'analisi avanzata in una pagina separata. Durante il tutorial lo evidenziamo soltanto.",
     target: "analysis",
+  },
+  {
+    id: "purchase-plans",
+    title: "Piani di acquisto",
+    description: "Qui imposti il tuo piano ricorrente e controlli se resta in linea con il budget deciso.",
+    target: "purchasePlans",
   },
   {
     id: "diary",
@@ -271,6 +295,10 @@ export default function DashboardPage() {
   const [isImportPreviewOpen, setIsImportPreviewOpen] = useState(false);
   const [importPreviewPortfolioId, setImportPreviewPortfolioId] = useState("");
   const [importPreviewSourcePlatform, setImportPreviewSourcePlatform] = useState("unknown");
+  const [purchasePlans, setPurchasePlans] = useState<PurchasePlanRow[]>([]);
+  const [isPurchasePlansLoading, setIsPurchasePlansLoading] = useState(false);
+  const [purchasePlanErrorMessage, setPurchasePlanErrorMessage] = useState<string | null>(null);
+  const [purchasePlanActionId, setPurchasePlanActionId] = useState<string | null>(null);
 
   const supabase = useMemo(() => createClient(), []);
   const symbolSearchContainerRef = useRef<HTMLDivElement | null>(null);
@@ -283,6 +311,7 @@ export default function DashboardPage() {
   const macroRef = useRef<HTMLDivElement | null>(null);
   const newsRef = useRef<HTMLDivElement | null>(null);
   const chatRef = useRef<HTMLDivElement | null>(null);
+  const purchasePlansRef = useRef<HTMLDivElement | null>(null);
   const diaryButtonRef = useRef<HTMLAnchorElement | null>(null);
   const importButtonRef = useRef<HTMLButtonElement | null>(null);
   const analysisButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -435,6 +464,21 @@ export default function DashboardPage() {
         setExpandedInsightIds({});
       }
     } catch (e) { console.error(e); } finally { setIsInsightsLoading(false); }
+  }, []);
+
+  const loadPurchasePlans = useCallback(async () => {
+    setIsPurchasePlansLoading(true);
+    setPurchasePlanErrorMessage(null);
+    try {
+      const response = await fetch("/api/purchase-plans", { method: "GET", cache: "no-store" });
+      const payload = (await response.json()) as { data?: PurchasePlanRow[]; error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "Non sono riuscito a caricare i piani di acquisto.");
+      setPurchasePlans(payload.data ?? []);
+    } catch (error) {
+      setPurchasePlanErrorMessage(error instanceof Error ? error.message : "Errore inatteso nel caricamento dei piani.");
+    } finally {
+      setIsPurchasePlansLoading(false);
+    }
   }, []);
 
   const toggleInsightExpanded = (index: number) => {
@@ -603,7 +647,7 @@ export default function DashboardPage() {
       const loadedPortfolios = await ensureDefaultPortfolio(user.id);
       const portfolioIds = loadedPortfolios.map((p) => p.id);
       const loadedAssets = await loadAssets(portfolioIds);
-      const [loadedNews] = await Promise.all([loadNews(), loadPrices(loadedAssets), loadMacroContext(), loadChatSessions()]);
+      const [loadedNews] = await Promise.all([loadNews(), loadPrices(loadedAssets), loadMacroContext(), loadChatSessions(), loadPurchasePlans()]);
       if (loadedNews && loadedNews.length > 0) void loadInsights(loadedNews);
 
       if (!hasTutorialAutostartChecked) {
@@ -616,7 +660,7 @@ export default function DashboardPage() {
       }
     } catch (e) { setErrorMessage(e instanceof Error ? e.message : "Errore inatteso."); }
     finally { setIsPageLoading(false); }
-  }, [ensureDefaultPortfolio, loadAssets, loadPrices, loadMacroContext, loadNews, loadChatSessions, loadInsights, hasTutorialAutostartChecked, getTutorialCompleted, router, supabase]);
+  }, [ensureDefaultPortfolio, loadAssets, loadPrices, loadMacroContext, loadNews, loadChatSessions, loadInsights, hasTutorialAutostartChecked, getTutorialCompleted, router, supabase, loadPurchasePlans]);
 
   useEffect(() => {
     const id = window.requestAnimationFrame(() => { void loadDashboardData(); });
@@ -656,6 +700,7 @@ export default function DashboardPage() {
         signals: signalsRef,
         macro: macroRef,
         news: newsRef,
+        purchasePlans: purchasePlansRef,
       };
       return refMap[step.target]?.current ?? null;
     };
@@ -665,7 +710,7 @@ export default function DashboardPage() {
         getTargetNode()?.scrollIntoView({ behavior: "smooth", block: "center" });
       });
     });
-  }, [isTutorialOpen, tutorialStepIndex, tutorialSteps, portfolioRef, insightsRef, signalsRef, macroRef, newsRef]);
+  }, [isTutorialOpen, tutorialStepIndex, tutorialSteps, portfolioRef, insightsRef, signalsRef, macroRef, newsRef, purchasePlansRef]);
 
   const handleCreatePortfolio = async (name: string): Promise<PortfolioRow | null> => {
     const { data: { user } } = await supabase.auth.getUser();
@@ -1112,6 +1157,45 @@ export default function DashboardPage() {
     }
   };
 
+  const handleTogglePurchasePlanStatus = async (plan: PurchasePlanRow) => {
+    setPurchasePlanErrorMessage(null);
+    setPurchasePlanActionId(plan.id);
+    try {
+      const nextStatus: PurchasePlanStatus = plan.status === "active" ? "paused" : "active";
+      const response = await fetch(`/api/purchase-plans/${plan.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      const payload = (await response.json()) as { data?: PurchasePlanRow; error?: string };
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Non sono riuscito ad aggiornare lo stato del piano.");
+      }
+      setPurchasePlans((prev) => prev.map((item) => (item.id === plan.id ? payload.data! : item)));
+    } catch (error) {
+      setPurchasePlanErrorMessage(error instanceof Error ? error.message : "Errore inatteso nell'aggiornamento del piano.");
+    } finally {
+      setPurchasePlanActionId(null);
+    }
+  };
+
+  const handleArchivePurchasePlan = async (planId: string) => {
+    setPurchasePlanErrorMessage(null);
+    setPurchasePlanActionId(planId);
+    try {
+      const response = await fetch(`/api/purchase-plans/${planId}`, { method: "DELETE" });
+      const payload = (await response.json()) as { data?: PurchasePlanRow; error?: string };
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Non sono riuscito ad archiviare il piano.");
+      }
+      setPurchasePlans((prev) => prev.map((item) => (item.id === planId ? payload.data! : item)));
+    } catch (error) {
+      setPurchasePlanErrorMessage(error instanceof Error ? error.message : "Errore inatteso nell'archiviazione del piano.");
+    } finally {
+      setPurchasePlanActionId(null);
+    }
+  };
+
   useEffect(() => {
     if (!isAddAssetModalOpen) return;
     const handler = (e: MouseEvent) => { if (!symbolSearchContainerRef.current?.contains(e.target as Node)) setShowSymbolDropdown(false); };
@@ -1169,21 +1253,38 @@ export default function DashboardPage() {
     finally { setIsSavingAsset(false); setIsFetchingHistoricalPrice(false); }
   };
 
-  const handleSendChatMessage = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const trimmedInput = chatInput.trim();
+  const sendChatMessage = useCallback(async (rawInput: string) => {
+    const trimmedInput = rawInput.trim();
     if (!trimmedInput || isSendingChat) return;
-    setChatErrorMessage(null); setIsSendingChat(true);
+    setChatErrorMessage(null);
+    setIsSendingChat(true);
     const historyForApi = chatMessages.filter((m) => m.content !== INITIAL_CHAT_MESSAGE || m.role !== "assistant");
-    setChatMessages((prev) => [...prev, { role: "user", content: trimmedInput }]); setChatInput("");
+    setChatMessages((prev) => [...prev, { role: "user", content: trimmedInput }]);
+    setChatInput("");
     try {
-      const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: trimmedInput, history: historyForApi, sessionId: currentSessionId }) });
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: trimmedInput, history: historyForApi, sessionId: currentSessionId }),
+      });
       const payload = (await res.json()) as { reply?: string; sessionId?: string; error?: string };
       if (!res.ok || !payload.reply) throw new Error(payload.error);
       setChatMessages((prev) => [...prev, { role: "assistant", content: payload.reply! }]);
-      if (payload.sessionId && !currentSessionId) { setCurrentSessionId(payload.sessionId); void loadChatSessions(); }
-    } catch (e) { setChatErrorMessage(e instanceof Error ? e.message : "Errore chat."); }
-    finally { setIsSendingChat(false); }
+      if (payload.sessionId && !currentSessionId) {
+        setCurrentSessionId(payload.sessionId);
+        void loadChatSessions();
+      }
+      void loadPurchasePlans();
+    } catch (e) {
+      setChatErrorMessage(e instanceof Error ? e.message : "Errore chat.");
+    } finally {
+      setIsSendingChat(false);
+    }
+  }, [chatMessages, currentSessionId, isSendingChat, loadChatSessions, loadPurchasePlans]);
+
+  const handleSendChatMessage = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    await sendChatMessage(chatInput);
   };
 
   const handleLoadSession = async (sessionId: string) => {
@@ -1201,6 +1302,19 @@ export default function DashboardPage() {
   const handleNewChat = () => {
     setChatMessages([{ role: "assistant", content: INITIAL_CHAT_MESSAGE }]);
     setCurrentSessionId(null); setChatErrorMessage(null); setIsHistoryOpen(false);
+  };
+
+  const openPurchasePlanChat = () => {
+    const kickoffMessage = "Creiamo il tuo nuovo piano. Ti faccio poche domande, una alla volta, e poi confermiamo insieme.";
+    setIsChatMinimized(false);
+    setIsChatExpanded(true);
+    setIsHistoryOpen(false);
+    setChatMessages([{ role: "assistant", content: "Creiamo il tuo nuovo piano." }]);
+    setCurrentSessionId(null);
+    void sendChatMessage(kickoffMessage);
+    window.requestAnimationFrame(() => {
+      chatInputRef.current?.focus();
+    });
   };
 
   const handleMinimizeChat = () => {
@@ -1542,6 +1656,129 @@ export default function DashboardPage() {
           )}
         </div>
       )}
+    </div>
+  );
+
+  const PurchasePlansSection = (
+    <div
+      ref={purchasePlansRef}
+      className={`scroll-mt-20 rounded-xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900 ${getTutorialTargetClass("purchasePlans")}`}
+    >
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold tracking-tight">Piani di acquisto</h2>
+          <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+            I piani nascono in dialogo col Mate e qui puoi monitorarli in un colpo d&apos;occhio.
+          </p>
+          <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-500">
+            Il piano ti aiuta a mantenere metodo, non a prevedere il mercato.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={openPurchasePlanChat}
+            className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+          >
+            Crea piano con Mate
+          </button>
+          <button
+            type="button"
+            onClick={() => void loadPurchasePlans()}
+            disabled={isPurchasePlansLoading}
+            className="inline-flex min-h-11 items-center rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+          >
+            {isPurchasePlansLoading ? "Aggiornamento..." : "Aggiorna"}
+          </button>
+        </div>
+      </div>
+
+      {purchasePlanErrorMessage && (
+        <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          {purchasePlanErrorMessage}
+        </p>
+      )}
+
+      {isPurchasePlansLoading ? (
+        <div className="space-y-2">
+          {[1, 2].map((item) => (
+            <div key={item} className="animate-pulse rounded-lg border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800/50">
+              <div className="mb-2 h-3 w-40 rounded bg-zinc-200 dark:bg-zinc-700" />
+              <div className="h-3 w-64 rounded bg-zinc-200 dark:bg-zinc-700" />
+            </div>
+          ))}
+        </div>
+      ) : purchasePlans.length === 0 ? (
+        <p className="rounded-lg border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-300">
+          Nessun piano ancora. Crea il primo piano per avere un ritmo coerente e meno impulsivo.
+        </p>
+      ) : (
+        <div className="space-y-3">
+          {purchasePlans.map((plan) => {
+            const isAttention = plan.monthly_budget_limit != null && Number(plan.amount) > Number(plan.monthly_budget_limit);
+            const statusLabel = plan.status === "active" ? "Attivo" : plan.status === "paused" ? "In pausa" : "Archiviato";
+            return (
+              <article key={plan.id} className="rounded-lg border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800/50">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">
+                      {plan.title}
+                      {plan.ticker && <span className="ml-2 rounded-full bg-blue-100 px-2 py-0.5 text-[11px] font-semibold text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">{plan.ticker}</span>}
+                    </h3>
+                    <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                      {plan.cadence} · {formatCurrency(Number(plan.amount))} · prossima data {new Date(plan.next_run_date).toLocaleDateString("it-IT")}
+                    </p>
+                    {plan.risk_note && (
+                      <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-300">
+                        Nota: {plan.risk_note}
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${plan.status === "active" ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300" : plan.status === "paused" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300" : "bg-zinc-200 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-200"}`}>
+                      {statusLabel}
+                    </span>
+                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${isAttention ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300" : "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"}`}>
+                      {isAttention ? "Attenzione" : "In linea"}
+                    </span>
+                  </div>
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {plan.status !== "archived" && (
+                    <button
+                      type="button"
+                      onClick={() => void handleTogglePurchasePlanStatus(plan)}
+                      disabled={purchasePlanActionId === plan.id}
+                      className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                    >
+                      {purchasePlanActionId === plan.id ? "Salvataggio..." : plan.status === "active" ? "Metti in pausa" : "Riattiva"}
+                    </button>
+                  )}
+                  {plan.status !== "archived" && (
+                    <button
+                      type="button"
+                      onClick={() => void handleArchivePurchasePlan(plan.id)}
+                      disabled={purchasePlanActionId === plan.id}
+                      className="rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-medium text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-900/50 dark:bg-zinc-900 dark:text-red-300"
+                    >
+                      Archivia
+                    </button>
+                  )}
+                  {plan.monthly_budget_limit != null && (
+                    <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                      Limite mensile: {formatCurrency(Number(plan.monthly_budget_limit))}
+                    </span>
+                  )}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
+
+      <p className="mt-4 text-xs text-zinc-500 dark:text-zinc-400">
+        Puoi mettere in pausa quando il contesto personale cambia.
+      </p>
     </div>
   );
 
@@ -2165,6 +2402,10 @@ export default function DashboardPage() {
               className="rounded-lg px-4 py-1.5 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100">
               Mercato
             </button>
+            <button type="button" onClick={() => scrollTo(purchasePlansRef)}
+              className="rounded-lg px-4 py-1.5 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100">
+              Piani
+            </button>
             <button type="button" onClick={() => scrollTo(newsRef)}
               className="rounded-lg px-4 py-1.5 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100">
               Notizie
@@ -2204,6 +2445,7 @@ export default function DashboardPage() {
               {InsightsSection}
               {SignalsSection}
               {PortfolioSection}
+              {PurchasePlansSection}
               {MacroSection}
               {NewsSection}
             </div>
@@ -2236,6 +2478,7 @@ export default function DashboardPage() {
           {InsightsSection}
           {SignalsSection}
           {PortfolioSection}
+          {PurchasePlansSection}
           {MacroSection}
           {NewsSection}
         </div>

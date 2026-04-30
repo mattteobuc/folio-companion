@@ -24,6 +24,15 @@ type DiaryAssetRow = {
   ticker: string;
 };
 
+type PurchasePlanRow = {
+  title: string;
+  ticker: string | null;
+  cadence: "settimanale" | "quindicinale" | "mensile";
+  amount: number;
+  monthly_budget_limit: number | null;
+  next_run_date: string;
+};
+
 export async function POST(request: Request) {
   try {
     const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
@@ -94,15 +103,37 @@ export async function POST(request: Request) {
       }).join("\n");
     }
 
+    const { data: purchasePlanRows } = await supabase
+      .from("purchase_plans")
+      .select("title, ticker, cadence, amount, monthly_budget_limit, next_run_date")
+      .eq("user_id", user.id)
+      .eq("status", "active")
+      .order("next_run_date", { ascending: true })
+      .limit(5);
+    const typedPurchasePlanRows = (purchasePlanRows ?? []) as PurchasePlanRow[];
+    const plansContext = typedPurchasePlanRows.length > 0
+      ? typedPurchasePlanRows.map((plan) => {
+          const tickerLabel = plan.ticker?.trim() ? `${plan.ticker.trim().toUpperCase()} · ` : "";
+          const budgetLabel = plan.monthly_budget_limit != null
+            ? plan.amount > plan.monthly_budget_limit
+              ? "attenzione budget"
+              : "budget in linea"
+            : "budget non impostato";
+          return `- ${tickerLabel}${plan.title}: ${plan.cadence}, importo ${plan.amount}, prossima data ${plan.next_run_date}, ${budgetLabel}`;
+        }).join("\n")
+      : "Nessun piano di acquisto attivo.";
+
     const prompt =
       `Il portafoglio contiene: ${tickers.join(", ")}.\n\n` +
       `Notizie recenti rilevanti:\n${newsContext}\n\n` +
+      `Piani di acquisto attivi:\n${plansContext}\n\n` +
       `Estratti dal diario personale:\n${diaryContext}\n\n` +
       `Genera esattamente 2-3 insight proattivi per l'investitore. Ogni insight deve:\n` +
       `- Essere diretto e specifico (menziona il ticker)\n` +
       `- Spiegare perché è rilevante ADESSO\n` +
       `- Essere scritto come un amico esperto che ti avvisa di qualcosa\n` +
       `- Tenere conto del tono emotivo emerso dal diario per essere empatico ma non paternalista\n` +
+      `- Tenere conto dei piani di acquisto attivi e segnalare eventuali incoerenze di processo con alternative comportamentali (es. ridurre frequenza/importo, pausa)\n` +
       `- NON dare mai consigli di acquisto o vendita\n\n` +
       `Rispondi SOLO con un array JSON valido in questo formato:\n` +
       `[\n` +
