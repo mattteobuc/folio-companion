@@ -13,6 +13,14 @@ type AssetRow = {
 };
 type PortfolioRow = { id: string; name: string };
 type NewsItem = { ticker: string; titolo: string; fonte: string; url: string; data: string; riassunto: string };
+type NewsMeta = {
+  hasAssets: boolean;
+  hasValidTickers: boolean;
+  usedNameFallback: boolean;
+  providerDegraded: boolean;
+  providerErrorsCount: number;
+  usedMarketFallback: boolean;
+};
 type MacroTopic = { topic: string; sentiment: string; analisi: string };
 type MacroPayload = { testo: string; topics: MacroTopic[] | null; data: string };
 type ChatMessage = { role: "user" | "assistant"; content: string };
@@ -147,6 +155,10 @@ type ImportPreviewRow = ImportCandidateRow & { id: string };
 const MACRO_CACHE_KEY = "folio:macro-context:v2";
 const MACRO_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const NEWS_SUMMARY_CACHE_KEY = "folio:news-summaries:v1";
+const NEWS_CACHE_KEY = "folio:news-cache:v1";
+const NEWS_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
+const INSIGHTS_CACHE_KEY = "folio:insights-cache:v1";
+const INSIGHTS_CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 const TUTORIAL_COMPLETED_LOCAL_KEY = "folio:tutorial-completed:v1";
 const INITIAL_CHAT_MESSAGE = "Ciao! Sono il tuo mate finanziario. Puoi chiedermi tutto sul tuo portafoglio, sulle notizie di mercato o sugli eventi macro. Non ti daro mai consigli diretti di acquisto o vendita, ma ti aiutero a capire meglio il contesto.";
 const IMPORT_AUTO_CONFIDENCE_THRESHOLD = 0.75;
@@ -241,6 +253,14 @@ export default function DashboardPage() {
   const [macroErrorMessage, setMacroErrorMessage] = useState<string | null>(null);
 
   const [news, setNews] = useState<NewsItem[]>([]);
+  const [newsMeta, setNewsMeta] = useState<NewsMeta>({
+    hasAssets: false,
+    hasValidTickers: false,
+    usedNameFallback: false,
+    providerDegraded: false,
+    providerErrorsCount: 0,
+    usedMarketFallback: false,
+  });
   const [isNewsLoading, setIsNewsLoading] = useState(false);
   const [newsErrorMessage, setNewsErrorMessage] = useState<string | null>(null);
 
@@ -314,6 +334,8 @@ export default function DashboardPage() {
   const chatRef = useRef<HTMLDivElement | null>(null);
   const chatMessagesRef = useRef<ChatMessage[]>([{ role: "assistant", content: INITIAL_CHAT_MESSAGE }]);
   const currentSessionIdRef = useRef<string | null>(null);
+  const assetsRef = useRef<AssetRow[]>([]);
+  const newsRefState = useRef<NewsItem[]>([]);
   const purchasePlansRef = useRef<HTMLDivElement | null>(null);
   const diaryButtonRef = useRef<HTMLAnchorElement | null>(null);
   const importButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -326,6 +348,14 @@ export default function DashboardPage() {
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
+
+  useEffect(() => {
+    assetsRef.current = assets;
+  }, [assets]);
+
+  useEffect(() => {
+    newsRefState.current = news;
+  }, [news]);
 
   const scrollTo = (ref: React.RefObject<HTMLDivElement | null>) => {
     ref.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -399,11 +429,25 @@ export default function DashboardPage() {
 
   const loadAssets = useCallback(async (portfolioIds: string[]): Promise<AssetRow[]> => {
     if (portfolioIds.length === 0) { setAssets([]); return []; }
+    const invalidateNewsAndInsightsCache = () => {
+      window.localStorage.removeItem(NEWS_CACHE_KEY);
+      window.localStorage.removeItem(INSIGHTS_CACHE_KEY);
+    };
+    const hasAssetSetChanged = (nextRows: AssetRow[]) => {
+      const prevIds = new Set(assetsRef.current.map((asset) => asset.id));
+      const nextIds = new Set(nextRows.map((asset) => asset.id));
+      if (prevIds.size !== nextIds.size) return true;
+      for (const id of prevIds) {
+        if (!nextIds.has(id)) return true;
+      }
+      return false;
+    };
     const latestSelect = "id, ticker, name, asset_type, quantity, purchase_price, purchase_date, portfolio_id, source_platform, external_symbol, import_batch_id";
     const legacySelect = "id, ticker, name, asset_type, quantity, purchase_price, purchase_date, portfolio_id";
     const latestResult = await supabase.from("assets").select(latestSelect).in("portfolio_id", portfolioIds).order("created_at", { ascending: false });
     if (!latestResult.error) {
       const rows = (latestResult.data ?? []) as AssetRow[];
+      if (hasAssetSetChanged(rows)) invalidateNewsAndInsightsCache();
       setAssets(rows);
       return rows;
     }
@@ -412,6 +456,7 @@ export default function DashboardPage() {
     const legacyResult = await supabase.from("assets").select(legacySelect).in("portfolio_id", portfolioIds).order("created_at", { ascending: false });
     if (legacyResult.error) throw latestResult.error;
     const rows = (legacyResult.data ?? []) as AssetRow[];
+    if (hasAssetSetChanged(rows)) invalidateNewsAndInsightsCache();
     setAssets(rows);
     return rows;
   }, [supabase]);
@@ -428,19 +473,77 @@ export default function DashboardPage() {
   }, []);
 
   const getNewsSummaryCache = () => {
-    try { const r = window.localStorage.getItem(NEWS_SUMMARY_CACHE_KEY); if (!r) return {}; const p = JSON.parse(r) as Record<string, string>; return typeof p === "object" ? p : {}; } catch { return {}; }
+    try {
+      const rawCache = window.localStorage.getItem(NEWS_SUMMARY_CACHE_KEY);
+      if (!rawCache) return {};
+      const parsedCache = JSON.parse(rawCache) as unknown;
+      if (!parsedCache || typeof parsedCache !== "object" || Array.isArray(parsedCache)) {
+        window.localStorage.removeItem(NEWS_SUMMARY_CACHE_KEY);
+        return {};
+      }
+      return Object.fromEntries(
+        Object.entries(parsedCache as Record<string, unknown>).filter(
+          ([key, value]) => typeof key === "string" && typeof value === "string",
+        ),
+      ) as Record<string, string>;
+    } catch {
+      window.localStorage.removeItem(NEWS_SUMMARY_CACHE_KEY);
+      return {};
+    }
   };
 
-  const loadNews = useCallback(async () => {
+  const loadNews = useCallback(async (options?: { forceRefresh?: boolean }) => {
     setIsNewsLoading(true); setNewsErrorMessage(null);
     try {
+      if (!options?.forceRefresh) {
+        const cachedNewsRaw = window.localStorage.getItem(NEWS_CACHE_KEY);
+        if (cachedNewsRaw) {
+          const cachedNewsPayload = JSON.parse(cachedNewsRaw) as {
+            news?: NewsItem[];
+            meta?: NewsMeta;
+            timestamp?: number;
+          };
+          const isFresh = Date.now() - (cachedNewsPayload.timestamp ?? 0) < NEWS_CACHE_TTL_MS;
+          if (isFresh && Array.isArray(cachedNewsPayload.news)) {
+            setNews(cachedNewsPayload.news);
+            if (cachedNewsPayload.meta) setNewsMeta(cachedNewsPayload.meta);
+            return cachedNewsPayload.news;
+          }
+        }
+      }
       const sc = getNewsSummaryCache();
       const res = await fetch("/api/news", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cachedSummaries: sc }) });
-      const payload = (await res.json()) as { news?: NewsItem[]; error?: string };
-      if (!res.ok) throw new Error(payload.error);
-      const nextNews = payload.news ?? []; setNews(nextNews);
+      const payload = (await res.json()) as { news?: NewsItem[]; error?: string; meta?: NewsMeta };
+      if (!res.ok) throw new Error(payload.error ?? "Non sono riuscito a recuperare le notizie.");
+      const nextNews = (payload.news ?? [])
+        .filter((item) => item && item.titolo && item.url && item.data)
+        .sort((a, b) => new Date(b.data).getTime() - new Date(a.data).getTime());
+      setNews(nextNews);
+      setNewsMeta(payload.meta ?? {
+        hasAssets: false,
+        hasValidTickers: false,
+        usedNameFallback: false,
+        providerDegraded: false,
+        providerErrorsCount: 0,
+        usedMarketFallback: false,
+      });
       const nc = { ...sc }; nextNews.forEach((item) => { const k = item.titolo.trim().toLowerCase(); if (k && item.riassunto) nc[k] = item.riassunto; });
       window.localStorage.setItem(NEWS_SUMMARY_CACHE_KEY, JSON.stringify(nc));
+      window.localStorage.setItem(
+        NEWS_CACHE_KEY,
+        JSON.stringify({
+          news: nextNews,
+          meta: payload.meta ?? {
+            hasAssets: false,
+            hasValidTickers: false,
+            usedNameFallback: false,
+            providerDegraded: false,
+            providerErrorsCount: 0,
+            usedMarketFallback: false,
+          },
+          timestamp: Date.now(),
+        }),
+      );
       return nextNews;
     } catch (e) { setNewsErrorMessage(e instanceof Error ? e.message : "Errore inatteso."); return []; }
     finally { setIsNewsLoading(false); }
@@ -465,14 +568,33 @@ export default function DashboardPage() {
     finally { setIsMacroLoading(false); }
   }, []);
 
-  const loadInsights = useCallback(async (currentNews: NewsItem[]) => {
+  const loadInsights = useCallback(async (options?: { forceRefresh?: boolean }) => {
     setIsInsightsLoading(true);
     try {
-      const res = await fetch("/api/insights", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ news: currentNews }) });
+      if (!options?.forceRefresh) {
+        const cachedInsightsRaw = window.localStorage.getItem(INSIGHTS_CACHE_KEY);
+        if (cachedInsightsRaw) {
+          const cachedInsightsPayload = JSON.parse(cachedInsightsRaw) as { insights?: Insight[]; timestamp?: number };
+          const isFresh = Date.now() - (cachedInsightsPayload.timestamp ?? 0) < INSIGHTS_CACHE_TTL_MS;
+          if (isFresh && Array.isArray(cachedInsightsPayload.insights)) {
+            setInsights(cachedInsightsPayload.insights);
+            setExpandedInsightIds({});
+            return;
+          }
+        }
+      }
+      const res = await fetch("/api/insights", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ news: newsRefState.current }) });
       const payload = (await res.json()) as { insights?: Insight[] };
       if (res.ok && payload.insights) {
         setInsights(payload.insights);
         setExpandedInsightIds({});
+        window.localStorage.setItem(
+          INSIGHTS_CACHE_KEY,
+          JSON.stringify({
+            insights: payload.insights,
+            timestamp: Date.now(),
+          }),
+        );
       }
     } catch (e) { console.error(e); } finally { setIsInsightsLoading(false); }
   }, []);
@@ -663,8 +785,8 @@ export default function DashboardPage() {
       const loadedPortfolios = await ensureDefaultPortfolio(user.id);
       const portfolioIds = loadedPortfolios.map((p) => p.id);
       const loadedAssets = await loadAssets(portfolioIds);
-      const [loadedNews] = await Promise.all([loadNews(), loadPrices(loadedAssets), loadMacroContext(), loadChatSessions(), loadPurchasePlans()]);
-      void loadInsights(loadedNews ?? []);
+      await Promise.all([loadNews(), loadPrices(loadedAssets), loadMacroContext(), loadChatSessions(), loadPurchasePlans()]);
+      void loadInsights();
 
       if (!hasTutorialAutostartChecked) {
         const tutorialCompleted = await getTutorialCompleted(user.id);
@@ -1148,7 +1270,7 @@ export default function DashboardPage() {
 
       const updatedAssets = await loadAssets(portfolios.map((p) => p.id));
       await loadPrices(updatedAssets);
-      await loadNews();
+      await loadNews({ forceRefresh: true });
 
       const excluded = importPreviewRows.length - selectedRows.length;
       setImportReport({
@@ -1263,7 +1385,7 @@ export default function DashboardPage() {
       const { error } = await supabase.from("assets").insert({ portfolio_id: targetPortfolioId, ticker: pricePayload.ticker ?? selectedAsset.ticker, name: selectedAsset.name, asset_type: selectedAsset.asset_type, quantity: Math.round(quantity * 10000) / 10000, purchase_price: Math.round(pricePayload.price * 100) / 100, purchase_date: purchaseDate });
       if (error) throw error;
       const updatedAssets = await loadAssets(portfolios.map((p) => p.id));
-      await loadPrices(updatedAssets); await loadNews();
+      await loadPrices(updatedAssets); await loadNews({ forceRefresh: true });
       resetAssetForm(); setIsAddAssetModalOpen(false);
     } catch (e) { setErrorMessage(e instanceof Error ? e.message : "Errore salvataggio."); }
     finally { setIsSavingAsset(false); setIsFetchingHistoricalPrice(false); }
@@ -1387,11 +1509,25 @@ export default function DashboardPage() {
 
   const openDiaryFromChat = () => {
     const latestUserMessage = [...chatMessages].reverse().find((message) => message.role === "user")?.content?.trim() ?? "";
-    const draft = chatInput.trim() || latestUserMessage;
-    if (!draft) {
+    const latestAssistantMessage = [...chatMessages].reverse().find((message) => message.role === "assistant")?.content?.trim() ?? "";
+    const draftSeed = chatInput.trim() || latestUserMessage;
+    const sanitizedAssistant = latestAssistantMessage
+      .replace(/[#>*`]/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 280);
+    if (!draftSeed && !sanitizedAssistant) {
       setChatErrorMessage("Scrivi prima un pensiero da salvare nel diario.");
       return;
     }
+    const draft = [
+      "Riassunto rapido dal confronto con Mate:",
+      draftSeed ? `- Tema emerso: ${draftSeed.slice(0, 220)}` : "- Tema emerso:",
+      sanitizedAssistant ? `- Spunto utile di Mate: ${sanitizedAssistant}` : "- Spunto utile di Mate:",
+      "- Come mi sento adesso:",
+      "- Cosa voglio monitorare nei prossimi giorni:",
+      "- Micro-passo concreto (non impulsivo):",
+    ].join("\n");
     const params = new URLSearchParams({
       source: "chat",
       contextType: "chat_reflection",
@@ -1879,7 +2015,7 @@ export default function DashboardPage() {
     <div ref={newsRef} className={`scroll-mt-20 ${getTutorialTargetClass("news")}`}>
       <div className="mb-4 flex items-center justify-between gap-3">
         <h2 className="text-xl font-semibold tracking-tight">Notizie per te</h2>
-        <button type="button" onClick={() => void loadNews()} disabled={isNewsLoading}
+        <button type="button" onClick={() => void loadNews({ forceRefresh: true })} disabled={isNewsLoading}
           className="inline-flex items-center rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-70 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
           {isNewsLoading ? "Aggiornamento..." : "Aggiorna"}
         </button>
@@ -1888,7 +2024,15 @@ export default function DashboardPage() {
       {isNewsLoading ? (
         <div className="rounded-xl border border-zinc-200 bg-white p-6 text-sm text-zinc-500 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">Caricamento notizie...</div>
       ) : news.length === 0 ? (
-        <div className="rounded-xl border border-zinc-200 bg-white p-6 text-sm text-zinc-500 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">Nessuna notizia disponibile.</div>
+        <div className="rounded-xl border border-zinc-200 bg-white p-6 text-sm text-zinc-500 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+          {!newsMeta.hasAssets
+            ? "Aggiungi un asset per vedere notizie contestuali."
+            : !newsMeta.hasValidTickers
+              ? "Notizie non trovate con i ticker importati. Verifica i ticker o completa i dati asset."
+              : newsMeta.providerDegraded
+                ? "Le fonti notizie sono temporaneamente instabili. Riprova tra poco."
+              : "Nessuna notizia rilevante trovata ora. Riprova tra poco."}
+        </div>
       ) : (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {news.map((item, index) => (
@@ -1921,7 +2065,7 @@ export default function DashboardPage() {
     <div ref={insightsRef} className={`rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 ${getTutorialTargetClass("insights")}`}>
       <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
         <h2 className="font-semibold tracking-tight">Insight del mate</h2>
-        <button type="button" onClick={() => void loadInsights(news)} disabled={isInsightsLoading}
+        <button type="button" onClick={() => void loadInsights({ forceRefresh: true })} disabled={isInsightsLoading}
           className="inline-flex items-center rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 transition hover:border-blue-300 hover:text-blue-600 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
           {isInsightsLoading ? "Aggiornamento..." : "Aggiorna"}
         </button>
