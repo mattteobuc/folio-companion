@@ -35,6 +35,13 @@ type ProviderErrorInfo = {
   message: string;
 };
 
+const GLOBAL_MARKET_CONTEXT_QUERIES = [
+  "geopolitics markets inflation",
+  "war conflict sanctions markets",
+  "election political risk stocks bonds",
+  "energy oil supply chain inflation",
+];
+
 const SUMMARY_SYSTEM_PROMPT =
   "Sei un assistente finanziario. Riassumi questa notizia in massimo 2 frasi in italiano, spiegando perché potrebbe essere rilevante per chi possiede questo asset. Non dare mai consigli di acquisto o vendita. Tono: chiaro, diretto, non allarmistico.";
 
@@ -266,6 +273,7 @@ async function handleNewsRequest(cachedSummaries: Record<string, string> = {}) {
           providerDegraded: false,
           providerErrorsCount: 0,
           usedMarketFallback: false,
+          usedGlobalContext: false,
         },
       });
     }
@@ -291,6 +299,7 @@ async function handleNewsRequest(cachedSummaries: Record<string, string> = {}) {
     );
 
     if (!hasAssets) {
+      console.info("News debug: nessun asset in portafoglio.");
       return NextResponse.json({
         news: [],
         meta: {
@@ -300,6 +309,7 @@ async function handleNewsRequest(cachedSummaries: Record<string, string> = {}) {
           providerDegraded: false,
           providerErrorsCount: 0,
           usedMarketFallback: false,
+          usedGlobalContext: false,
         },
       });
     }
@@ -314,6 +324,7 @@ async function handleNewsRequest(cachedSummaries: Record<string, string> = {}) {
     }> = [];
     let usedNameFallback = false;
     let usedMarketFallback = false;
+    let usedGlobalContext = false;
     const seenAssetKeys = new Set<string>();
     const providerErrors: ProviderErrorInfo[] = [];
 
@@ -329,7 +340,10 @@ async function handleNewsRequest(cachedSummaries: Record<string, string> = {}) {
         return arr.indexOf(query) === idx;
       });
 
-      if (searchQueries.length === 0) continue;
+      if (searchQueries.length === 0) {
+        console.info("News debug: asset ignorato per query vuota.", { assetKey });
+        continue;
+      }
 
       let mergedArticles: GNewsArticle[] = [];
       let matchedQuery = searchQueries[0];
@@ -384,10 +398,10 @@ async function handleNewsRequest(cachedSummaries: Record<string, string> = {}) {
 
           newsResults.push({
             ticker: assetLabel,
-            titolo: article.title,
+            titolo: article.title?.trim() || "Notizia mercato",
             fonte: sourceName,
             url: article.url,
-            data: article.publishedAt,
+            data: article.publishedAt || new Date().toISOString(),
             riassunto: summary,
           });
         } catch (error) {
@@ -433,10 +447,10 @@ async function handleNewsRequest(cachedSummaries: Record<string, string> = {}) {
             }
             newsResults.push({
               ticker: "MACRO",
-              titolo: article.title,
+              titolo: article.title?.trim() || "Aggiornamento macro",
               fonte: sourceName,
               url: article.url,
-              data: article.publishedAt,
+              data: article.publishedAt || new Date().toISOString(),
               riassunto: summary,
             });
           } catch (error) {
@@ -446,15 +460,88 @@ async function handleNewsRequest(cachedSummaries: Record<string, string> = {}) {
       }
     }
 
+    const shouldFetchGlobalContext = newsResults.length < 8;
+    if (shouldFetchGlobalContext) {
+      for (const query of GLOBAL_MARKET_CONTEXT_QUERIES) {
+        if (newsResults.length >= 12) break;
+        const globalResult = await fetchArticlesWithProviderFallback(query, gnewsApiKey, newsApiKey);
+        providerErrors.push(...globalResult.providerErrors);
+        if (globalResult.articles.length === 0) continue;
+        usedGlobalContext = true;
+        for (const article of globalResult.articles) {
+          try {
+            const sourceName = article.source?.name?.trim() || "Fonte non disponibile";
+            const cacheKey = normalizeTitleKey(article.title ?? "");
+            let summary = cacheKey ? cachedSummaries[cacheKey] : undefined;
+            if (!summary) {
+              try {
+                summary = await summarizeWithClaude({
+                  ticker: "CONTESTO GLOBALE",
+                  title: article.title,
+                  source: sourceName,
+                  date: article.publishedAt,
+                  url: article.url,
+                  description: article.description ?? "",
+                  content: article.content ?? "",
+                });
+              } catch {
+                summary = buildFallbackSummary({
+                  ticker: "CONTESTO GLOBALE",
+                  title: article.title,
+                  source: sourceName,
+                });
+              }
+            }
+            newsResults.push({
+              ticker: "CONTESTO GLOBALE",
+              titolo: article.title?.trim() || "Aggiornamento contesto globale",
+              fonte: sourceName,
+              url: article.url,
+              data: article.publishedAt || new Date().toISOString(),
+              riassunto: summary,
+            });
+          } catch (error) {
+            console.error("Errore elaborazione news contesto globale:", { title: article.title, error });
+          }
+        }
+      }
+    }
+
+    const filteredNews = newsResults
+      .filter((item) => item.titolo?.trim() && item.url?.trim())
+      .map((item) => ({
+        ...item,
+        data: item.data?.trim() ? item.data : new Date().toISOString(),
+      }));
+
     const dedupedNews = Array.from(
       new Map(
-        newsResults
-          .filter((item) => item.titolo?.trim() && item.url?.trim() && item.data?.trim())
-          .map((item) => [item.url, item]),
+        filteredNews.map((item) => [item.url, item]),
       ).values(),
     ).sort((a, b) => new Date(b.data).getTime() - new Date(a.data).getTime());
+    console.info("News debug: conteggi pipeline.", {
+      assetCount: normalizedAssets.length,
+      hasValidTickers,
+      rawCount: newsResults.length,
+      filteredCount: filteredNews.length,
+      dedupedCount: dedupedNews.length,
+      providerErrors: providerErrors.length,
+      usedMarketFallback,
+      usedGlobalContext,
+    });
     if (providerErrors.length > 0) {
       console.error("Provider news degradati:", providerErrors);
+    }
+    if (newsResults.length === 0) {
+      console.info("News debug: zero articoli dopo fetch provider.", {
+        hasAssets,
+        hasValidTickers,
+      });
+    } else if (dedupedNews.length === 0) {
+      console.info("News debug: zero articoli dopo dedup/filtri.", {
+        rawCount: newsResults.length,
+        filteredCount: filteredNews.length,
+      });
     }
     return NextResponse.json({
       news: dedupedNews,
@@ -465,6 +552,7 @@ async function handleNewsRequest(cachedSummaries: Record<string, string> = {}) {
         providerDegraded: providerErrors.length > 0,
         providerErrorsCount: providerErrors.length,
         usedMarketFallback,
+        usedGlobalContext,
       },
     });
   } catch (error) {

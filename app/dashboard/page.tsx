@@ -20,13 +20,14 @@ type NewsMeta = {
   providerDegraded: boolean;
   providerErrorsCount: number;
   usedMarketFallback: boolean;
+  usedGlobalContext?: boolean;
 };
 type MacroTopic = { topic: string; sentiment: string; analisi: string };
 type MacroPayload = { testo: string; topics: MacroTopic[] | null; data: string };
 type ChatMessage = { role: "user" | "assistant"; content: string };
 type SymbolSearchResult = { ticker: string; name: string; market: string; asset_type: string };
 type PricesMap = Record<string, number | null>;
-type MobileTab = "portfolio" | "news";
+type MobileTab = "portfolio" | "news" | "diary";
 type ChatSession = { id: string; title: string | null; updated_at: string };
 type TutorialStep = {
   id: string;
@@ -289,6 +290,19 @@ function timeAgo(dateStr: string): string {
   return `${Math.floor(days / 30)}m fa`;
 }
 
+function isRefreshTokenAuthError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const maybeError = error as { message?: string; name?: string; status?: number };
+  const msg = (maybeError.message ?? "").toLowerCase();
+  return (
+    maybeError.name === "AuthApiError"
+    && (msg.includes("invalid refresh token")
+      || msg.includes("refresh token not found")
+      || msg.includes("jwt")
+      || maybeError.status === 401)
+  );
+}
+
 export default function DashboardPage() {
   const router = useRouter();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
@@ -326,6 +340,7 @@ export default function DashboardPage() {
     providerDegraded: false,
     providerErrorsCount: 0,
     usedMarketFallback: false,
+    usedGlobalContext: false,
   });
   const [isNewsLoading, setIsNewsLoading] = useState(false);
   const [newsErrorMessage, setNewsErrorMessage] = useState<string | null>(null);
@@ -357,6 +372,8 @@ export default function DashboardPage() {
   const [isAddAssetModalOpen, setIsAddAssetModalOpen] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>("portfolio");
+  const [isMobileActionsMenuOpen, setIsMobileActionsMenuOpen] = useState(false);
+  const [isNewsExpandedMobile, setIsNewsExpandedMobile] = useState(false);
 
   const [assetSearchQuery, setAssetSearchQuery] = useState("");
   const [assetSearchResults, setAssetSearchResults] = useState<SymbolSearchResult[]>([]);
@@ -395,6 +412,7 @@ export default function DashboardPage() {
   const chatBottomRef = useRef<HTMLDivElement | null>(null);
   const chatInputRef = useRef<HTMLInputElement | null>(null);
   const portfolioMenuRef = useRef<HTMLDivElement | null>(null);
+  const mobileActionsMenuRef = useRef<HTMLDivElement | null>(null);
   const portfolioRef = useRef<HTMLDivElement | null>(null);
   const insightsRef = useRef<HTMLDivElement | null>(null);
   const signalsRef = useRef<HTMLDivElement | null>(null);
@@ -472,6 +490,7 @@ export default function DashboardPage() {
   }, [prices]);
 
   const openAddAssetModal = (preselectedPortfolioId?: string) => {
+    setIsMobileActionsMenuOpen(false);
     setSelectedPortfolioId(preselectedPortfolioId ?? portfolios[0]?.id ?? "");
     setShowNewPortfolioInput(false); setModalNewPortfolioName(""); setIsAddAssetModalOpen(true);
   };
@@ -562,6 +581,16 @@ export default function DashboardPage() {
     }
   };
 
+  const recoverInvalidSession = useCallback(async (origin: string) => {
+    console.warn("Sessione Supabase non valida: avvio recovery login.", { origin });
+    try {
+      await supabase.auth.signOut();
+    } catch (signOutError) {
+      console.warn("Errore durante signOut di recovery sessione:", signOutError);
+    }
+    router.replace("/login?next=%2Fdashboard");
+  }, [router, supabase]);
+
   const loadNews = useCallback(async (options?: { forceRefresh?: boolean }) => {
     setIsNewsLoading(true); setNewsErrorMessage(null);
     try {
@@ -584,6 +613,10 @@ export default function DashboardPage() {
       const sc = getNewsSummaryCache();
       const res = await fetch("/api/news", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cachedSummaries: sc }) });
       const payload = (await res.json()) as { news?: NewsItem[]; error?: string; meta?: NewsMeta };
+      if (res.status === 401) {
+        await recoverInvalidSession("loadNews");
+        return [];
+      }
       if (!res.ok) throw new Error(payload.error ?? "Non sono riuscito a recuperare le notizie.");
       const nextNews = (payload.news ?? [])
         .filter((item) => item && item.titolo && item.url && item.data)
@@ -596,6 +629,7 @@ export default function DashboardPage() {
         providerDegraded: false,
         providerErrorsCount: 0,
         usedMarketFallback: false,
+          usedGlobalContext: false,
       });
       const nc = { ...sc }; nextNews.forEach((item) => { const k = item.titolo.trim().toLowerCase(); if (k && item.riassunto) nc[k] = item.riassunto; });
       window.localStorage.setItem(NEWS_SUMMARY_CACHE_KEY, JSON.stringify(nc));
@@ -610,14 +644,22 @@ export default function DashboardPage() {
             providerDegraded: false,
             providerErrorsCount: 0,
             usedMarketFallback: false,
+            usedGlobalContext: false,
           },
           timestamp: Date.now(),
         }),
       );
       return nextNews;
-    } catch (e) { setNewsErrorMessage(e instanceof Error ? e.message : "Errore inatteso."); return []; }
+    } catch (e) {
+      if (isRefreshTokenAuthError(e)) {
+        await recoverInvalidSession("loadNews.catch");
+        return [];
+      }
+      setNewsErrorMessage(e instanceof Error ? e.message : "Errore inatteso.");
+      return [];
+    }
     finally { setIsNewsLoading(false); }
-  }, []);
+  }, [recoverInvalidSession]);
 
   const loadMacroContext = useCallback(async (options?: { forceRefresh?: boolean }) => {
     setIsMacroLoading(true); setMacroErrorMessage(null);
@@ -631,12 +673,22 @@ export default function DashboardPage() {
       }
       const res = await fetch("/api/macro", { method: "GET", cache: "no-store" });
       const payload = (await res.json()) as MacroPayload & { error?: string };
+      if (res.status === 401) {
+        await recoverInvalidSession("loadMacroContext");
+        return;
+      }
       if (!res.ok) throw new Error(payload.error);
       setMacroText(payload.testo || ""); setMacroTopics(payload.topics ?? null); setMacroDate(payload.data || "");
       window.localStorage.setItem(MACRO_CACHE_KEY, JSON.stringify({ testo: payload.testo || "", topics: payload.topics ?? null, data: payload.data || "", timestamp: Date.now() }));
-    } catch (e) { setMacroErrorMessage(e instanceof Error ? e.message : "Errore inatteso."); }
+    } catch (e) {
+      if (isRefreshTokenAuthError(e)) {
+        await recoverInvalidSession("loadMacroContext.catch");
+        return;
+      }
+      setMacroErrorMessage(e instanceof Error ? e.message : "Errore inatteso.");
+    }
     finally { setIsMacroLoading(false); }
-  }, []);
+  }, [recoverInvalidSession]);
 
   const loadInsights = useCallback(async (options?: { forceRefresh?: boolean }) => {
     setIsInsightsLoading(true);
@@ -655,6 +707,10 @@ export default function DashboardPage() {
       }
       const res = await fetch("/api/insights", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ news: newsRefState.current }) });
       const payload = (await res.json()) as { insights?: Insight[] };
+      if (res.status === 401) {
+        await recoverInvalidSession("loadInsights");
+        return;
+      }
       if (res.ok && payload.insights) {
         setInsights(payload.insights);
         setExpandedInsightIds({});
@@ -666,8 +722,14 @@ export default function DashboardPage() {
           }),
         );
       }
-    } catch (e) { console.error(e); } finally { setIsInsightsLoading(false); }
-  }, []);
+    } catch (e) {
+      if (isRefreshTokenAuthError(e)) {
+        await recoverInvalidSession("loadInsights.catch");
+        return;
+      }
+      console.error(e);
+    } finally { setIsInsightsLoading(false); }
+  }, [recoverInvalidSession]);
 
   const loadPurchasePlans = useCallback(async () => {
     setIsPurchasePlansLoading(true);
@@ -675,6 +737,10 @@ export default function DashboardPage() {
     try {
       const response = await fetch("/api/purchase-plans", { method: "GET", cache: "no-store" });
       const payload = (await response.json()) as PurchasePlansResponse;
+      if (response.status === 401) {
+        await recoverInvalidSession("loadPurchasePlans");
+        return;
+      }
       if (payload.warning === "schema_missing") {
         // Fallback non bloccante: mostra empty state anche se migration non applicata.
         setPurchasePlans([]);
@@ -683,11 +749,15 @@ export default function DashboardPage() {
       if (!response.ok) throw new Error(payload.error ?? "Non sono riuscito a caricare i piani di acquisto.");
       setPurchasePlans(payload.data ?? []);
     } catch (error) {
+      if (isRefreshTokenAuthError(error)) {
+        await recoverInvalidSession("loadPurchasePlans.catch");
+        return;
+      }
       setPurchasePlanErrorMessage(error instanceof Error ? error.message : "Errore inatteso nel caricamento dei piani.");
     } finally {
       setIsPurchasePlansLoading(false);
     }
-  }, []);
+  }, [recoverInvalidSession]);
 
   const toggleInsightExpanded = (index: number) => {
     setExpandedInsightIds((prev) => ({ ...prev, [index]: !prev[index] }));
@@ -770,6 +840,7 @@ export default function DashboardPage() {
     const boundedIndex = Math.max(0, Math.min(nextIndex, tutorialSteps.length - 1));
     const target = tutorialSteps[boundedIndex]?.target;
     if (target === "news") setMobileTab("news");
+    else if (target === "diary") setMobileTab("diary");
     else setMobileTab("portfolio");
     setTutorialStepIndex(boundedIndex);
   };
@@ -848,7 +919,13 @@ export default function DashboardPage() {
     setErrorMessage(null); setIsPageLoading(true);
     try {
       const { data: { user }, error: userError } = await supabase.auth.getUser();
-      if (userError) throw userError;
+      if (userError) {
+        if (isRefreshTokenAuthError(userError)) {
+          await recoverInvalidSession("loadDashboardData.getUser");
+          return;
+        }
+        throw userError;
+      }
       if (!user) { router.push("/login"); router.refresh(); return; }
       setCurrentUserId(user.id);
       setUserEmail(user.email ?? "");
@@ -947,12 +1024,22 @@ export default function DashboardPage() {
         }
         setHasTutorialAutostartChecked(true);
       }
-    } catch (e) { setErrorMessage(e instanceof Error ? e.message : "Errore inatteso."); }
+    } catch (e) {
+      if (isRefreshTokenAuthError(e)) {
+        await recoverInvalidSession("loadDashboardData.catch");
+        return;
+      }
+      setErrorMessage(e instanceof Error ? e.message : "Errore inatteso.");
+    }
     finally { setIsPageLoading(false); }
-  }, [ensureDefaultPortfolio, loadAssets, loadPrices, loadMacroContext, loadNews, loadChatSessions, loadInsights, hasTutorialAutostartChecked, getTutorialCompleted, router, supabase, loadPurchasePlans]);
+  }, [ensureDefaultPortfolio, loadAssets, loadPrices, loadMacroContext, loadNews, loadChatSessions, loadInsights, hasTutorialAutostartChecked, getTutorialCompleted, router, supabase, loadPurchasePlans, recoverInvalidSession]);
 
   const refreshMateOnboardingSnapshot = useCallback(async () => {
-    const { data: { user } } = await supabase.auth.getUser();
+    const { data: { user }, error: userError } = await supabase.auth.getUser();
+    if (userError && isRefreshTokenAuthError(userError)) {
+      await recoverInvalidSession("refreshMateOnboardingSnapshot.getUser");
+      return;
+    }
     if (!user) return;
     const { data: row, error } = await supabase
       .from("user_mate_profile")
@@ -979,7 +1066,7 @@ export default function DashboardPage() {
       volatility_comfort: row?.volatility_comfort ?? null,
       mate_style: row?.mate_style ?? null,
     });
-  }, [supabase]);
+  }, [supabase, recoverInvalidSession]);
 
   useEffect(() => {
     const id = window.requestAnimationFrame(() => { void loadDashboardData(); });
@@ -989,7 +1076,10 @@ export default function DashboardPage() {
   useEffect(() => { chatBottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chatMessages]);
 
   useEffect(() => {
-    const handler = (e: MouseEvent) => { if (portfolioMenuRef.current && !portfolioMenuRef.current.contains(e.target as Node)) setIsPortfolioMenuOpen(false); };
+    const handler = (e: MouseEvent) => {
+      if (portfolioMenuRef.current && !portfolioMenuRef.current.contains(e.target as Node)) setIsPortfolioMenuOpen(false);
+      if (mobileActionsMenuRef.current && !mobileActionsMenuRef.current.contains(e.target as Node)) setIsMobileActionsMenuOpen(false);
+    };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
@@ -1060,7 +1150,15 @@ export default function DashboardPage() {
 
   const handleLogout = async () => {
     setIsLoggingOut(true);
-    try { const { error } = await supabase.auth.signOut(); if (error) { setErrorMessage(error.message); return; } router.push("/login"); router.refresh(); }
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error && !isRefreshTokenAuthError(error)) {
+        setErrorMessage(error.message);
+        return;
+      }
+      router.push("/login");
+      router.refresh();
+    }
     catch (e) { setErrorMessage(e instanceof Error ? e.message : "Errore logout."); }
     finally { setIsLoggingOut(false); }
   };
@@ -1096,6 +1194,7 @@ export default function DashboardPage() {
   };
 
   const openImportModal = () => {
+    setIsMobileActionsMenuOpen(false);
     resetImportForm();
     setImportPortfolioId(portfolios[0]?.id ?? "");
     setIsImportModalOpen(true);
@@ -1900,12 +1999,12 @@ export default function DashboardPage() {
   // ── SECTIONS ──────────────────────────────────────────────────
   const PortfolioSection = (
     <div ref={portfolioRef} className={`scroll-mt-20 ${getTutorialTargetClass("portfolio")}`}>
-      <div className="mb-3 flex items-center justify-between">
+      <div className="mb-3 flex items-center justify-between gap-2">
         <h1 className="text-xl font-semibold tracking-tight">Il mio portafoglio</h1>
         <div className="flex items-center gap-2">
           {portfolios.length > 1 && (
             <button type="button" onClick={toggleAllCollapsed} title={allCollapsed ? "Espandi tutti" : "Minimizza tutti"}
-              className="flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-400 transition hover:border-zinc-300 hover:text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900">
+              className="flex h-11 w-11 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-400 transition hover:border-zinc-300 hover:text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 {allCollapsed
                   ? <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5M3.75 3.75L9 9M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15m11.25 5.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
@@ -1914,16 +2013,53 @@ export default function DashboardPage() {
               </svg>
             </button>
           )}
-          <button type="button" onClick={() => openAddAssetModal(activePortfolioFilter !== "all" ? activePortfolioFilter : undefined)}
-            className="inline-flex min-h-11 items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500">
+          <button
+            type="button"
+            data-testid="mobile-add-asset-button"
+            onClick={() => openAddAssetModal(activePortfolioFilter !== "all" ? activePortfolioFilter : undefined)}
+            className="inline-flex min-h-11 items-center justify-center rounded-xl bg-blue-600 px-3 py-2 text-base font-semibold text-white shadow-sm transition hover:bg-blue-500 lg:min-w-[124px] lg:gap-1.5 lg:px-4 lg:text-sm"
+            aria-label="Aggiungi asset"
+          >
             <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
-            Aggiungi
+            <span className="hidden lg:inline">Aggiungi</span>
           </button>
+          <div className="relative lg:hidden" ref={mobileActionsMenuRef}>
+            <button
+              type="button"
+              data-testid="mobile-actions-menu-button"
+              onClick={() => setIsMobileActionsMenuOpen((prev) => !prev)}
+              className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-zinc-300 bg-white text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+              aria-label="Azioni rapide"
+              aria-expanded={isMobileActionsMenuOpen}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5m-16.5 5.25h16.5m-16.5 5.25h16.5" /></svg>
+            </button>
+            {isMobileActionsMenuOpen && (
+              <div data-testid="mobile-actions-menu" className="absolute right-0 top-12 z-30 w-52 rounded-2xl border border-zinc-200 bg-white p-1.5 shadow-xl dark:border-zinc-700 dark:bg-zinc-900">
+                <button
+                  type="button"
+                  onClick={() => { setIsMobileActionsMenuOpen(false); openImportModal(); }}
+                  className={`flex min-h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-sm font-medium text-zinc-700 transition hover:bg-zinc-100 hover:text-blue-700 dark:text-zinc-200 dark:hover:bg-zinc-800 ${getTutorialTargetClass("import")}`}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-9-13.5v13.5m0 0l4.5-4.5m-4.5 4.5L7.5 12" /></svg>
+                  Importa con Mate
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setIsMobileActionsMenuOpen(false); router.push("/dashboard/analisi"); }}
+                  className={`flex min-h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-sm font-medium text-zinc-700 transition hover:bg-zinc-100 hover:text-blue-700 dark:text-zinc-200 dark:hover:bg-zinc-800 ${getTutorialTargetClass("analysis")}`}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M3 3h18v4.5H3V3zm0 7.5h6v10.5H3V10.5zm9 0h9v10.5h-9V10.5z" /></svg>
+                  Apri analisi
+                </button>
+              </div>
+            )}
+          </div>
           <button
             type="button"
             ref={importButtonRef}
             onClick={openImportModal}
-            className={`inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 ${getTutorialTargetClass("import")}`}
+            className={`hidden min-h-11 items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 lg:inline-flex ${getTutorialTargetClass("import")}`}
           >
             Importa con Mate
           </button>
@@ -1931,7 +2067,7 @@ export default function DashboardPage() {
             ref={analysisButtonRef}
             type="button"
             onClick={() => router.push("/dashboard/analisi")}
-            className={`inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 ${getTutorialTargetClass("analysis")}`}
+            className={`hidden min-h-11 items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 lg:inline-flex ${getTutorialTargetClass("analysis")}`}
           >
             Apri analisi
           </button>
@@ -2214,7 +2350,7 @@ export default function DashboardPage() {
       ) : isMacroLoading ? (
         <div className="space-y-3">{[1, 2, 3].map((i) => <div key={i} className="animate-pulse rounded-lg bg-zinc-100 p-4 dark:bg-zinc-800"><div className="mb-2 h-3 w-1/3 rounded bg-zinc-200 dark:bg-zinc-700" /><div className="h-3 w-full rounded bg-zinc-200 dark:bg-zinc-700" /></div>)}</div>
       ) : macroTopics && macroTopics.length > 0 ? (
-        <div className="space-y-3">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           {macroTopics.map((item, i) => (
             <div key={i} className="rounded-lg border border-zinc-100 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-800/50">
               <div className="mb-2 flex items-center justify-between gap-2">
@@ -2238,11 +2374,32 @@ export default function DashboardPage() {
   const NewsSection = (
     <div ref={newsRef} className={`scroll-mt-20 ${getTutorialTargetClass("news")}`}>
       <div className="mb-4 flex items-center justify-between gap-3">
-        <h2 className="text-xl font-semibold tracking-tight">Notizie per te</h2>
-        <button type="button" onClick={() => void loadNews({ forceRefresh: true })} disabled={isNewsLoading}
-          className="inline-flex items-center rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-70 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
-          {isNewsLoading ? "Aggiornamento..." : "Aggiorna"}
-        </button>
+        <div>
+          <h2 className="text-xl font-semibold tracking-tight">Notizie per te</h2>
+          <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+            Asset in portafoglio + contesto geopolitico e macro con impatto potenziale sui mercati.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            data-testid="mobile-news-expand-button"
+            onClick={() => setIsNewsExpandedMobile((prev) => !prev)}
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-zinc-300 bg-white text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 lg:hidden"
+            aria-label={isNewsExpandedMobile ? "Comprimi notizie" : "Visualizza tutte le notizie"}
+            title={isNewsExpandedMobile ? "Comprimi" : "Visualizza tutto"}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+              {isNewsExpandedMobile
+                ? <path strokeLinecap="round" strokeLinejoin="round" d="M9 9V4.5M9 9H4.5M9 9L3.75 3.75M9 15v4.5M9 15H4.5M9 15l-5.25 5.25M15 9h4.5M15 9V4.5M15 9l5.25-5.25M15 15h4.5M15 15v4.5m0-4.5l5.25 5.25" />
+                : <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 9V3.75H9m6 0h5.25V9m0 6v5.25H15m-6 0H3.75V15" />}
+            </svg>
+          </button>
+          <button type="button" onClick={() => void loadNews({ forceRefresh: true })} disabled={isNewsLoading}
+            className="inline-flex min-h-11 items-center rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:border-blue-300 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-70 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
+            {isNewsLoading ? "Aggiornamento..." : "Aggiorna"}
+          </button>
+        </div>
       </div>
       {newsErrorMessage && <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{newsErrorMessage}</p>}
       {isNewsLoading ? (
@@ -2258,28 +2415,52 @@ export default function DashboardPage() {
               : "Nessuna notizia rilevante trovata ora. Riprova tra poco."}
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          {news.map((item, index) => (
-            <article key={`${item.ticker}-${item.url}-${index}`} className="rounded-xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-              <div className="mb-3 inline-flex items-center rounded-full bg-blue-100 px-2.5 py-1 text-xs font-semibold text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">{item.ticker}</div>
-              <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">{item.titolo}</h3>
-              <p className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-300">{item.riassunto}</p>
-              <div className="mt-4 flex items-center justify-between text-xs text-zinc-500">
-                <span>{item.fonte}</span><span>{new Date(item.data).toLocaleDateString("it-IT")}</span>
-              </div>
-              <div className="mt-4 flex items-center gap-3">
-                <a href={item.url} target="_blank" rel="noopener noreferrer" className="inline-flex text-sm font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400">Leggi articolo</a>
-                <button
-                  type="button"
-                  onClick={() => openChatFromNews(item)}
-                  className="inline-flex rounded-lg border border-blue-300 px-2.5 py-1 text-xs font-semibold text-blue-700 transition hover:bg-blue-50 dark:border-blue-700 dark:text-blue-300 dark:hover:bg-blue-900/20"
-                >
-                  Parlane col mate
-                </button>
-              </div>
-            </article>
-          ))}
-        </div>
+        <>
+          <div data-testid="news-carousel-mobile" className={`-mx-1 flex snap-x snap-mandatory gap-3 overflow-x-auto px-1 pb-2 pr-4 lg:hidden ${isNewsExpandedMobile ? "hidden" : ""}`}>
+            {news.map((item, index) => (
+              <article key={`${item.ticker}-${item.url}-${index}`} className="w-[88%] shrink-0 snap-start rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+                <div className="mb-3 inline-flex items-center rounded-full bg-blue-100 px-2.5 py-1 text-xs font-semibold text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">{item.ticker}</div>
+                <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">{item.titolo}</h3>
+                <p className="mt-2 max-h-24 overflow-hidden text-sm leading-6 text-zinc-600 dark:text-zinc-300">{item.riassunto}</p>
+                <div className="mt-4 flex items-center justify-between text-xs text-zinc-500">
+                  <span className="truncate pr-2">{item.fonte}</span><span>{new Date(item.data).toLocaleDateString("it-IT")}</span>
+                </div>
+                <div className="mt-4 flex items-center gap-3">
+                  <a href={item.url} target="_blank" rel="noopener noreferrer" className="inline-flex text-sm font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400">Leggi articolo</a>
+                  <button
+                    type="button"
+                    onClick={() => openChatFromNews(item)}
+                    className="inline-flex rounded-lg border border-blue-300 px-2.5 py-1 text-xs font-semibold text-blue-700 transition hover:bg-blue-50 dark:border-blue-700 dark:text-blue-300 dark:hover:bg-blue-900/20"
+                  >
+                    Parlane col mate
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+          <div className={`grid grid-cols-1 gap-4 md:grid-cols-2 ${isNewsExpandedMobile ? "" : "hidden lg:grid"}`}>
+            {news.map((item, index) => (
+              <article key={`${item.ticker}-${item.url}-${index}`} className="rounded-xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+                <div className="mb-3 inline-flex items-center rounded-full bg-blue-100 px-2.5 py-1 text-xs font-semibold text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">{item.ticker}</div>
+                <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">{item.titolo}</h3>
+                <p className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-300">{item.riassunto}</p>
+                <div className="mt-4 flex items-center justify-between text-xs text-zinc-500">
+                  <span>{item.fonte}</span><span>{new Date(item.data).toLocaleDateString("it-IT")}</span>
+                </div>
+                <div className="mt-4 flex items-center gap-3">
+                  <a href={item.url} target="_blank" rel="noopener noreferrer" className="inline-flex text-sm font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400">Leggi articolo</a>
+                  <button
+                    type="button"
+                    onClick={() => openChatFromNews(item)}
+                    className="inline-flex rounded-lg border border-blue-300 px-2.5 py-1 text-xs font-semibold text-blue-700 transition hover:bg-blue-50 dark:border-blue-700 dark:text-blue-300 dark:hover:bg-blue-900/20"
+                  >
+                    Parlane col mate
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        </>
       )}
       <p className="mt-4 text-xs italic text-zinc-400">Notizie e riassunti generati da AI · solo a scopo informativo · non costituiscono consulenza finanziaria</p>
     </div>
@@ -2896,18 +3077,45 @@ export default function DashboardPage() {
             </div>
           )}
           {mobileTab === "news" && NewsSection}
+          {mobileTab === "diary" && (
+            <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+              <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">Diario</h3>
+              <p className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-300">
+                Cattura emozioni, pensieri e decisioni per migliorare consapevolezza e disciplina nel tempo.
+              </p>
+              <Link
+                href="/checkin"
+                className="mt-4 inline-flex min-h-11 items-center rounded-xl bg-blue-600 px-4 text-sm font-semibold text-white transition hover:bg-blue-500"
+              >
+                Apri Diario
+              </Link>
+            </div>
+          )}
         </div>
-        <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-zinc-200 bg-white/95 pb-[env(safe-area-inset-bottom)] backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/95">
-          <div className="flex">
-            {(["portfolio", "news"] as MobileTab[]).map((tab) => {
+        <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-zinc-200/70 bg-white/80 pb-[max(env(safe-area-inset-bottom),8px)] backdrop-blur-xl dark:border-zinc-800/80 dark:bg-zinc-900/80">
+          <div className="mx-auto flex w-full max-w-xl px-2">
+            {(["portfolio", "news", "diary"] as MobileTab[]).map((tab) => {
               const icons: Record<MobileTab, React.ReactNode> = {
                 portfolio: <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />,
                 news: <path strokeLinecap="round" strokeLinejoin="round" d="M12 7.5h1.5m-1.5 3h1.5m-7.5 3h7.5m-7.5 3h7.5m3-9h3.375c.621 0 1.125.504 1.125 1.125V18a2.25 2.25 0 01-2.25 2.25M16.5 7.5V18a2.25 2.25 0 002.25 2.25M16.5 7.5V4.875c0-.621-.504-1.125-1.125-1.125H4.125C3.504 3.75 3 4.254 3 4.875V18a2.25 2.25 0 002.25 2.25h13.5M6 7.5h3v3H6v-3z" />,
+                diary: <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-8.25a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 6v12a2.25 2.25 0 002.25 2.25h10.5A2.25 2.25 0 0019.5 18v-3.75m-9-6h6m-6 3h6m-6 3h3" />,
               };
-              const labels: Record<MobileTab, string> = { portfolio: "Portafoglio", news: "Notizie" };
+              const labels: Record<MobileTab, string> = { portfolio: "Portafoglio", news: "Notizie", diary: "Diario" };
               return (
-                <button key={tab} type="button" onClick={() => setMobileTab(tab)}
-                  className={`flex min-h-11 flex-1 flex-col items-center justify-center gap-1 py-2 text-xs font-medium transition ${mobileTab === tab ? "text-blue-600 dark:text-blue-400" : "text-zinc-500 dark:text-zinc-400"}`}>
+                <button
+                  key={tab}
+                  type="button"
+                  data-testid={tab === "diary" ? "mobile-nav-diary" : undefined}
+                  onClick={() => {
+                    if (tab === "diary") {
+                      router.push("/checkin");
+                      return;
+                    }
+                    setMobileTab(tab);
+                  }}
+                  className={`relative flex min-h-12 flex-1 flex-col items-center justify-center gap-1 rounded-xl py-2 text-xs font-medium transition ${mobileTab === tab ? "text-blue-600 dark:text-blue-400" : "text-zinc-500 dark:text-zinc-400"}`}
+                >
+                  {mobileTab === tab && <span className="absolute inset-x-3 top-1 h-0.5 rounded-full bg-blue-500/80" />}
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>{icons[tab]}</svg>
                   {labels[tab]}
                 </button>
