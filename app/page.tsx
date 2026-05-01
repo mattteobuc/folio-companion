@@ -145,9 +145,9 @@ export default function Home() {
           <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-300 sm:text-base">Funzioni concrete, pensate per investitori autonomi.</p>
           <div className="mt-6 grid gap-3 md:grid-cols-3">
             {[
-              { title: "🔔 Insight personalizzati", value: "Non notifiche generiche. Segnali costruiti sui titoli che possiedi, con una spiegazione in linguaggio normale." },
-              { title: "💬 Compagno con memoria", value: "Ricorda le tue conversazioni passate. Sa perché hai comprato quel titolo. Ti aiuta a restare coerente con la tua strategia nel tempo." },
-              { title: "📰 Notizia → conversazione in un click", value: "Hai letto qualcosa che non capisci? Un tap e sei già in chat a parlarne. Zero copia-incolla." },
+              { title: "Dentro in 30 secondi", value: "Carica uno screenshot dal tuo broker e Mate riconosce tutti i tuoi titoli automaticamente. Zero inserimenti manuali, zero errori." },
+              { title: "Pensa prima di agire", value: "Hai un'idea di investimento? Ragionaci con Mate prima di muoverti. Salva il tuo pensiero nel diario e rileggilo quando il mercato ti mette pressione — spesso è il momento più utile." },
+              { title: "Solo quello che ti riguarda", value: "Ogni mattina Mate seleziona le notizie che riguardano i tuoi titoli e te le spiega in due righe. Niente Bloomberg, niente ansia da FOMO." },
               { title: "📊 Portafogli multipli", value: "Hai Fineco, Degiro e un conto crypto? Gestiscili tutti separati o guarda il totale aggregato in un colpo solo." },
               { title: "🌍 Contesto macro ogni giorno", value: "BCE, Fed, geopolitica. Cosa sta succedendo nel mondo e perché potrebbe interessarti — in tre frasi, ogni mattina." },
               { title: "🎯 Piani di investimento con Mate", value: "Dimmi quanto vuoi investire, in quanto tempo e con che profilo di rischio. Mate ti aiuta a costruire un piano coerente, spiegando ogni scelta — senza dirti cosa comprare." },
