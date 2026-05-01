@@ -1,18 +1,26 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { FormEvent, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { FormEvent, Suspense, useState } from "react";
 import { createClient } from "@/utils/supabase/client";
 
-export default function SignupPage() {
+function SignupFormContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const selectedPlan = searchParams.get("plan");
+  const planHint =
+    selectedPlan === "free"
+      ? "Stai creando il piano Free"
+      : selectedPlan === "pro"
+        ? "Stai creando il piano PRO (Coming Soon)"
+        : null;
 
   const handleSignup = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -78,6 +86,11 @@ export default function SignupPage() {
         <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
           Crea il tuo account Folio Mate.
         </p>
+        {planHint && (
+          <p className="mt-2 inline-flex rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 dark:border-blue-900/40 dark:bg-blue-950/30 dark:text-blue-300">
+            {planHint}
+          </p>
+        )}
         <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
           Dopo la registrazione riceverai una mail di conferma: se non la trovi, controlla anche spam o promozioni.
         </p>
@@ -159,5 +172,24 @@ export default function SignupPage() {
         </p>
       </div>
     </main>
+  );
+}
+
+export default function SignupPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="flex min-h-screen items-center justify-center bg-zinc-50 px-4 py-12 dark:bg-zinc-950">
+          <div className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-8 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+            <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-100">Registrati</h1>
+            <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
+              Crea il tuo account Folio Mate.
+            </p>
+          </div>
+        </main>
+      }
+    >
+      <SignupFormContent />
+    </Suspense>
   );
 }
