@@ -33,7 +33,7 @@ export default function Home() {
               Il mercato non dorme. Non puoi stare sveglio con lui.
             </h1>
             <p className="mt-3 text-base text-zinc-600 dark:text-zinc-300 sm:text-lg">
-              Folio Mate legge le notizie per te, le collega ai titoli che hai in portafoglio e ti spiega cosa sta succedendo — in italiano, senza gergo, senza consigli di acquisto.
+              Folio Mate legge le notizie per te, le collega ai titoli che hai in portafoglio e ti spiega cosa sta succedendo.
             </p>
             <div className="mt-6 flex flex-col justify-center gap-3 sm:flex-row">
               <a href="/signup" className="inline-flex items-center justify-center rounded-lg bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">
@@ -46,6 +46,30 @@ export default function Home() {
             <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-400">
               Folio Mate
             </p>
+          </div>
+        </div>
+      </section>
+
+      <section className="border-b border-zinc-200 bg-white py-14 dark:border-zinc-800 dark:bg-zinc-900/30">
+        <div className="mx-auto w-full max-w-6xl px-4 sm:px-6 lg:px-8">
+          <div className="rounded-3xl border border-zinc-200 bg-gradient-to-b from-white to-zinc-50 p-6 shadow-sm dark:border-zinc-700 dark:from-zinc-900 dark:to-zinc-950 sm:p-8">
+            <h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">Tutto quello che ti serve. Niente di quello che non ti serve.</h2>
+            <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-300 sm:text-base">Funzioni concrete, pensate per investitori autonomi.</p>
+            <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {[
+                { title: "Dentro in 30 secondi", value: "Carica uno screenshot dal tuo broker e Mate riconosce tutti i tuoi titoli automaticamente. Zero inserimenti manuali, zero errori." },
+                { title: "Pensa prima di agire", value: "Hai un'idea di investimento? Ragionaci con Mate prima di muoverti. Salva il tuo pensiero nel diario e rileggilo quando il mercato ti mette pressione — spesso è il momento più utile." },
+                { title: "Solo quello che ti riguarda", value: "Ogni mattina Mate seleziona le notizie che riguardano i tuoi titoli e te le spiega in due righe. Niente Bloomberg, niente ansia da FOMO." },
+                { title: "📊 Portafogli multipli", value: "Hai Fineco, Degiro e un conto crypto? Gestiscili tutti separati o guarda il totale aggregato in un colpo solo." },
+                { title: "🌍 Contesto macro ogni giorno", value: "BCE, Fed, geopolitica. Cosa sta succedendo nel mondo e perché potrebbe interessarti — in tre frasi, ogni mattina." },
+                { title: "🎯 Piani di investimento con Mate", value: "Dimmi quanto vuoi investire, in quanto tempo e con che profilo di rischio. Mate ti aiuta a costruire un piano coerente, spiegando ogni scelta — senza dirti cosa comprare." },
+              ].map((item) => (
+                <article key={item.title} className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-md dark:border-zinc-700 dark:bg-zinc-900">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500 dark:text-zinc-400">{item.title}</p>
+                  <p className="mt-2 text-sm font-medium leading-6 text-zinc-700 dark:text-zinc-200">{item.value}</p>
+                </article>
+              ))}
+            </div>
           </div>
         </div>
       </section>
@@ -135,28 +159,6 @@ export default function Home() {
                 Sara, 44 anni, Roma · Luca, 41 anni, Torino
               </div>
             </div>
-          </div>
-        </div>
-      </section>
-
-      <section className="border-b border-zinc-200 bg-white py-14 dark:border-zinc-800 dark:bg-zinc-900/30">
-        <div className="mx-auto w-full max-w-6xl px-4 sm:px-6 lg:px-8">
-          <h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">Tutto quello che ti serve. Niente di quello che non ti serve.</h2>
-          <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-300 sm:text-base">Funzioni concrete, pensate per investitori autonomi.</p>
-          <div className="mt-6 grid gap-3 md:grid-cols-3">
-            {[
-              { title: "Dentro in 30 secondi", value: "Carica uno screenshot dal tuo broker e Mate riconosce tutti i tuoi titoli automaticamente. Zero inserimenti manuali, zero errori." },
-              { title: "Pensa prima di agire", value: "Hai un'idea di investimento? Ragionaci con Mate prima di muoverti. Salva il tuo pensiero nel diario e rileggilo quando il mercato ti mette pressione — spesso è il momento più utile." },
-              { title: "Solo quello che ti riguarda", value: "Ogni mattina Mate seleziona le notizie che riguardano i tuoi titoli e te le spiega in due righe. Niente Bloomberg, niente ansia da FOMO." },
-              { title: "📊 Portafogli multipli", value: "Hai Fineco, Degiro e un conto crypto? Gestiscili tutti separati o guarda il totale aggregato in un colpo solo." },
-              { title: "🌍 Contesto macro ogni giorno", value: "BCE, Fed, geopolitica. Cosa sta succedendo nel mondo e perché potrebbe interessarti — in tre frasi, ogni mattina." },
-              { title: "🎯 Piani di investimento con Mate", value: "Dimmi quanto vuoi investire, in quanto tempo e con che profilo di rischio. Mate ti aiuta a costruire un piano coerente, spiegando ogni scelta — senza dirti cosa comprare." },
-            ].map((item) => (
-              <article key={item.title} className="rounded-xl border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-900">
-                <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">{item.title}</p>
-                <p className="mt-2 text-sm font-medium">{item.value}</p>
-              </article>
-            ))}
           </div>
         </div>
       </section>
